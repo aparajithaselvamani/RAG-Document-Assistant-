@@ -1,0 +1,3 @@
+Retrieval-Augmented Generation, or RAG, helps language models answer questions using external documents.
+The system retrieves relevant chunks from a document store and passes that context to the model, which then answers using only the retrieved evidence.
+RAG is useful when the model needs up-to-date or domain-specific knowledge that is not stored in its weights.

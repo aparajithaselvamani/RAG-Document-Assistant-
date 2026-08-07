@@ -1,0 +1,3 @@
+Embeddings convert text into vectors that capture semantic meaning.
+These vectors allow systems to find related content even when the wording differs.
+ChromaDB is a vector database that stores embeddings and supports semantic search over document chunks.

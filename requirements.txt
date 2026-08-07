@@ -1,0 +1,8 @@
+langchain
+langchain-community
+langchain-chroma
+chromadb
+sentence-transformers
+pypdf
+ollama
+pytest
