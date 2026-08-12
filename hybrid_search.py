@@ -12,63 +12,38 @@ def _result_key(document: Document) -> str:
     metadata = document.metadata or {}
     source = str(metadata.get("source") or "")
     content_hash = hashlib.sha256(document.page_content.encode("utf-8")).hexdigest()[:16]
-    if source:
-        return f"{source}:{content_hash}"
-    return content_hash
+    return f"{source}:{content_hash}" if source else content_hash
 
 
 def deduplicate_results(results: List[Tuple[Document, float]]) -> List[Tuple[Document, float]]:
-    """Merge duplicate results by document identity while keeping the strongest score."""
+    """Keep one copy of each chunk, retaining its strongest relevance score."""
     merged: Dict[str, Tuple[Document, float]] = {}
     for document, score in results:
         key = _result_key(document)
-        if key not in merged:
-            merged[key] = (document, score)
-        else:
-            existing_document, existing_score = merged[key]
-            if score > existing_score:
-                merged[key] = (document, score)
+        if key not in merged or score > merged[key][1]:
+            merged[key] = (document, float(score))
+    return _sort_results(list(merged.values()))
 
-    deduped = list(merged.values())
-    deduped.sort(
-        key=lambda item: (
-            -item[1],
-            str(item[0].metadata.get("source") or ""),
-            item[0].metadata.get("chunk_id", 0),
-            item[0].page_content,
-        )
+
+def _sort_results(results: List[Tuple[Document, float]]) -> List[Tuple[Document, float]]:
+    return sorted(
+        results,
+        key=lambda item: (-item[1], str(item[0].metadata.get("source") or ""), item[0].metadata.get("chunk_id", 0), item[0].page_content),
     )
-    return deduped
 
 
 def normalize_semantic_results(results: List[Tuple[Document, float]]) -> List[Tuple[Document, float]]:
-    """Convert Chroma distance scores into similarity scores and preserve the strongest match."""
-    normalized: List[Tuple[Document, float]] = []
-    for document, score in results:
-        distance = max(float(score), 1e-9)
-        similarity = 1.0 / (1.0 + distance)
-        normalized.append((document, similarity))
+    """Convert Chroma distances (lower is better) to a 0..1 similarity score."""
+    normalized = [(document, 1.0 / (1.0 + max(0.0, float(distance)))) for document, distance in results]
+    return deduplicate_results(normalized)
 
-    merged: Dict[str, Tuple[Document, float]] = {}
-    for document, similarity in normalized:
-        key = _result_key(document)
-        if key not in merged:
-            merged[key] = (document, similarity)
-        else:
-            existing_document, existing_score = merged[key]
-            if similarity > existing_score:
-                merged[key] = (document, similarity)
 
-    ranked = list(merged.values())
-    ranked.sort(
-        key=lambda item: (
-            -item[1],
-            str(item[0].metadata.get("source") or ""),
-            item[0].metadata.get("chunk_id", 0),
-            item[0].page_content,
-        )
-    )
-    return ranked
+def _normalize_scores(results: List[Tuple[Document, float]]) -> Dict[str, float]:
+    """Normalize non-negative relevance scores by the strongest candidate."""
+    strongest = max((score for _, score in results), default=0.0)
+    if strongest <= 0:
+        return {}
+    return {_result_key(document): max(0.0, score) / strongest for document, score in results}
 
 
 def hybrid_search(
@@ -78,54 +53,39 @@ def hybrid_search(
     top_k: int = 4,
     keyword_results: List[Tuple[Document, float]] | None = None,
 ) -> List[Tuple[Document, float]]:
-    """Combine semantic and keyword scores into a weighted hybrid ranking with duplicates removed."""
-    if not chunks:
+    """Combine Chroma distance and lexical relevance without filling results with noise.
+
+    ``semantic_results`` contains raw Chroma distances.  It is intentionally
+    normalized exactly once here; lower distances become higher similarities.
+    A chunk needs lexical evidence or to be close to the best semantic match to
+    qualify, so a merely returned nearest neighbour is not automatically shown.
+    """
+    if not chunks or top_k <= 0:
         return []
 
-    semantic_results = normalize_semantic_results(semantic_results)
-    if keyword_results is None:
-        keyword_results = keyword_search(query, chunks, top_k=top_k * 2)
-    keyword_results = deduplicate_results(keyword_results)
+    semantic = normalize_semantic_results(semantic_results)
+    keyword = deduplicate_results(keyword_results if keyword_results is not None else keyword_search(query, chunks, top_k=top_k * 2))
+    semantic_map = {_result_key(document): (document, score) for document, score in semantic}
+    keyword_map = {_result_key(document): (document, score) for document, score in keyword}
+    keyword_normalized = _normalize_scores(keyword)
+    best_semantic = max((score for _, score in semantic), default=0.0)
 
-    combined_scores: Dict[str, Tuple[Document, float]] = {}
-    for document, semantic_score in semantic_results:
-        key = _result_key(document)
-        combined_scores[key] = (document, 0.9 * semantic_score)
+    ranked: List[Tuple[Document, float]] = []
+    for key in set(semantic_map) | set(keyword_map):
+        semantic_entry = semantic_map.get(key)
+        keyword_entry = keyword_map.get(key)
+        document = semantic_entry[0] if semantic_entry else keyword_entry[0]
+        semantic_score = semantic_entry[1] if semantic_entry else 0.0
+        keyword_score = keyword_normalized.get(key, 0.0)
 
-    for document, keyword_score in keyword_results:
-        key = _result_key(document)
-        if key in combined_scores:
-            existing_document, existing_score = combined_scores[key]
-            combined_scores[key] = (existing_document, existing_score + 0.1 * keyword_score)
-        else:
-            combined_scores[key] = (document, 0.1 * keyword_score)
+        # Lexical matches are explicit evidence. Pure semantic candidates must
+        # be near the best match instead of being included just because top-k
+        # vector search always returns neighbours.
+        has_keyword_evidence = key in keyword_map
+        semantically_competitive = best_semantic > 0 and semantic_score >= max(0.35, best_semantic * 0.88)
+        if not has_keyword_evidence and not semantically_competitive:
+            continue
 
-    query_lower = (query or "").lower()
-    for key, (document, score) in list(combined_scores.items()):
-        content_lower = document.page_content.lower()
-        boost = 0.0
-        if "rag" in query_lower:
-            if "retrieval" in content_lower and "generation" in content_lower:
-                boost = 0.35
-            elif "rag" in content_lower:
-                boost = 0.25
-            elif "retrieval" in content_lower or "generation" in content_lower or "augmented" in content_lower:
-                boost = 0.12
-        elif "embedding" in query_lower and ("embedding" in content_lower or "vector" in content_lower):
-            boost = 0.18
-        elif "hybrid" in query_lower and ("hybrid" in content_lower or "semantic" in content_lower or "keyword" in content_lower):
-            boost = 0.16
-        elif "vector" in query_lower and ("vector" in content_lower or "database" in content_lower):
-            boost = 0.12
-        combined_scores[key] = (document, score + boost)
+        ranked.append((document, 0.65 * semantic_score + 0.35 * keyword_score))
 
-    hybrid_results = list(combined_scores.values())
-    hybrid_results.sort(
-        key=lambda item: (
-            -item[1],
-            str(item[0].metadata.get("source") or ""),
-            item[0].metadata.get("chunk_id", 0),
-            item[0].page_content,
-        )
-    )
-    return hybrid_results[:top_k]
+    return _sort_results(ranked)[:top_k]

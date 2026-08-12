@@ -1,9 +1,14 @@
+import sys
+from collections import deque
 from pathlib import Path
 
 from langchain_core.documents import Document
 
-from app import rewrite_query
-from hybrid_search import hybrid_search
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import app
+from app import format_conversation_history, rewrite_query, update_conversation_history
+from hybrid_search import hybrid_search, normalize_semantic_results
 from ingest import copy_uploaded_document, index_uploaded_document, validate_uploaded_file
 from keyword_search import keyword_search
 from utils import create_sample_documents
@@ -88,15 +93,15 @@ def test_hybrid_search_deduplicates_and_ranks_results() -> None:
     ]
 
     semantic_results = [
-        (chunks[0], 0.40),
-        (chunks[1], 0.20),
-        (chunks[0], 0.35),
+        (chunks[0], 0.20),
+        (chunks[1], 0.40),
+        (chunks[0], 0.25),
     ]
 
     hybrid_results = hybrid_search("What is RAG?", chunks, semantic_results, top_k=2)
 
     assert hybrid_results
-    assert len(hybrid_results) == 2
+    assert len(hybrid_results) == 1
     assert hybrid_results[0][0].metadata["source"] == "rag.txt"
 
 
@@ -107,8 +112,8 @@ def test_hybrid_search_prefers_rag_document_for_rag_queries() -> None:
     ]
 
     semantic_results = [
-        (chunks[0], 0.40),
-        (chunks[1], 0.20),
+        (chunks[0], 0.20),
+        (chunks[1], 0.40),
     ]
 
     hybrid_results = hybrid_search("What is RAG?", chunks, semantic_results, top_k=1)
@@ -131,3 +136,113 @@ def test_keyword_search_does_not_return_duplicate_chunks() -> None:
 
     assert len(results) == 1
     assert results[0][0].metadata["chunk_id"] == 0
+
+
+def test_update_conversation_history_keeps_only_latest_five_turns() -> None:
+    history = deque(maxlen=5)
+
+    for index in range(6):
+        update_conversation_history(history, f"Question {index}", f"Answer {index}")
+
+    assert len(history) == 5
+    assert history[0][0] == "Question 1"
+    assert history[-1][0] == "Question 5"
+
+
+def test_format_conversation_history_renders_turns() -> None:
+    history = deque(maxlen=5)
+    history.append(("What is RAG?", "RAG is retrieval augmented generation."))
+    history.append(("How does it work?", "It uses retrieved context to ground responses."))
+
+    formatted = format_conversation_history(history)
+
+    assert "Conversation History:" in formatted
+    assert "User: What is RAG?" in formatted
+    assert "Assistant: It uses retrieved context to ground responses." in formatted
+
+
+def test_generate_answer_includes_conversation_history_in_prompt(monkeypatch: object) -> None:
+    history = deque(maxlen=5)
+    history.append(("What is RAG?", "RAG is retrieval augmented generation."))
+
+    captured: dict[str, str] = {}
+
+    def fake_generate(*args: object, **kwargs: object) -> dict[str, str]:
+        captured["prompt"] = kwargs["prompt"]
+        return {"response": "A follow-up answer."}
+
+    monkeypatch.setattr(app.ollama, "generate", fake_generate)
+
+    context = [Document(page_content="RAG combines retrieval with generation.", metadata={"source": "rag.txt"})]
+    answer = app.generate_answer("How does it work?", context, conversation_history=history)
+
+    assert answer == "A follow-up answer."
+    assert "Conversation History:" in captured["prompt"]
+    assert "User: What is RAG?" in captured["prompt"]
+    assert "Question:\nHow does it work?" in captured["prompt"]
+
+
+def test_hybrid_search_filters_irrelevant_documents_for_semantic_search_queries() -> None:
+    relevant_chunk = Document(
+        page_content="Semantic search uses vector similarity to find conceptually related passages.",
+        metadata={"source": "search_methods.txt", "chunk_id": 0},
+    )
+    irrelevant_chunk = Document(
+        page_content="The leave policy allows paid vacation days and requires advance notice.",
+        metadata={"source": "upload_test.txt", "chunk_id": 0},
+    )
+    chunks = [relevant_chunk, irrelevant_chunk]
+    # Raw Chroma distances: lower means a closer semantic match.
+    semantic_results = [(relevant_chunk, 0.21), (irrelevant_chunk, 1.25)]
+
+    hybrid_results = hybrid_search("How is it different from keyword search?", chunks, semantic_results, top_k=4)
+
+    assert hybrid_results
+    assert hybrid_results[0][0].metadata["source"] == "search_methods.txt"
+    assert all(result[0].metadata["source"] != "upload_test.txt" for result in hybrid_results)
+
+
+def test_generate_answer_prompt_anchors_on_the_current_question() -> None:
+    context = [Document(page_content="Semantic search uses vector similarity while keyword search uses lexical overlap.", metadata={"source": "search_methods.txt"})]
+
+    captured: dict[str, str] = {}
+
+    def fake_generate(*args: object, **kwargs: object) -> dict[str, str]:
+        captured["prompt"] = kwargs["prompt"]
+        return {"response": "Semantic search ranks by meaning."}
+
+    app.ollama.generate = fake_generate
+
+    answer = app.generate_answer("How is semantic search different from keyword search?", context)
+
+    assert answer == "Semantic search ranks by meaning."
+    assert "Answer the user's current question" in captured["prompt"]
+    assert "Retrieved Context:" in captured["prompt"]
+    assert "Question:" in captured["prompt"]
+
+
+def test_normalize_semantic_results_converts_lower_distance_to_higher_similarity() -> None:
+    close = Document(page_content="close", metadata={"source": "close.txt"})
+    far = Document(page_content="far", metadata={"source": "far.txt"})
+
+    results = normalize_semantic_results([(far, 1.5), (close, 0.2)])
+
+    assert results[0][0] == close
+    assert 0 < results[0][1] <= 1
+
+
+def test_hybrid_search_removes_duplicate_chunks() -> None:
+    chunk = Document(page_content="Semantic search uses vector similarity.", metadata={"source": "methods.txt", "chunk_id": 0})
+    results = hybrid_search("semantic search", [chunk], [(chunk, 0.2), (chunk, 0.4)], top_k=4)
+
+    assert len(results) == 1
+
+
+def test_display_sources_only_lists_the_chunks_given_to_answer_generation(capsys: object) -> None:
+    relevant = Document(page_content="Semantic search uses vector similarity.", metadata={"source": "search_methods.txt"})
+
+    app.display_sources([relevant])
+
+    output = capsys.readouterr().out
+    assert "search_methods.txt" in output
+    assert "upload_test.txt" not in output

@@ -83,3 +83,15 @@ python app.py
 - Explain keyword search.
 - What is hybrid search?
 - What is query rewriting?
+
+## Conversation Memory
+
+The assistant now keeps a short-term memory of the most recent user/assistant exchanges while the app is running. It uses a bounded deque of up to five turns, so follow-up questions can be answered with context from the recent conversation without changing the retrieval pipeline.
+
+Example:
+
+- User: What is RAG?
+- Assistant: RAG combines retrieval with generation.
+- User: How does it work?
+
+The second answer can use the recent exchange to interpret "it" more accurately while still relying on the same retrieved documents.

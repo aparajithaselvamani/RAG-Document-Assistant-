@@ -31,22 +31,9 @@ def keyword_search(query: str, chunks: List[Document], top_k: int = 4) -> List[T
     if not query_tokens:
         return []
 
+    # Keep lexical retrieval lexical. Broad technical-term expansion made a
+    # query about one search method match unrelated documents about another.
     expanded_tokens = set(query_tokens)
-    technical_terms = {
-        "rag": {"rag", "retrieval", "generation", "augmented"},
-        "retrieval": {"retrieval", "generation", "augmented", "rag"},
-        "generation": {"generation", "retrieval", "augmented", "rag"},
-        "augmented": {"augmented", "retrieval", "generation", "rag"},
-        "vector": {"vector", "database", "databases", "embedding", "embeddings"},
-        "database": {"database", "databases", "vector", "embedding", "embeddings"},
-        "embedding": {"embedding", "embeddings", "vector", "database"},
-        "embeddings": {"embeddings", "embedding", "vector", "database"},
-        "semantic": {"semantic", "search", "embedding", "embeddings"},
-        "hybrid": {"hybrid", "semantic", "keyword", "search"},
-        "keyword": {"keyword", "search", "hybrid"},
-    }
-    for token in query_tokens:
-        expanded_tokens.update(technical_terms.get(token, set()))
 
     doc_freq: Counter[str] = Counter()
     term_doc_freq: List[Counter[str]] = []
@@ -88,13 +75,8 @@ def keyword_search(query: str, chunks: List[Document], top_k: int = 4) -> List[T
                 weight += 0.05
             score += tf * idf * weight
 
-        if any(token in content_text for token in expanded_tokens):
+        if any(token in counter for token in expanded_tokens):
             score += 0.15
-        if any(token in content_text for token in {"rag", "retrieval", "generation", "augmented"}) and "rag" in expanded_tokens:
-            score += 0.2
-        if any(token in content_text for token in {"embedding", "embeddings", "vector", "database"}) and {"embedding", "embeddings", "vector", "database"} & expanded_tokens:
-            score += 0.2
-
         if score > 0:
             key = _result_key(chunk)
             existing = unique_results.get(key)

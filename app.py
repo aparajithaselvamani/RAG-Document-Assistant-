@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+from collections import deque
 from pathlib import Path
-from typing import List, Tuple
+from typing import Deque, List, Tuple
 
 import ollama
 from langchain_chroma import Chroma
@@ -22,6 +23,26 @@ from utils import (
 
 BASE_DIR = Path(__file__).resolve().parent
 VECTOR_DB_DIR = BASE_DIR / "vector_db" / "chroma"
+MAX_CONVERSATION_TURNS = 5
+
+
+def update_conversation_history(history: Deque[Tuple[str, str]], user_question: str, assistant_answer: str) -> None:
+    """Append a new interaction to the conversation history while keeping it bounded."""
+    history.append((user_question.strip(), assistant_answer.strip()))
+
+
+def format_conversation_history(history: Deque[Tuple[str, str]]) -> str:
+    """Render the recent conversation history for prompt injection."""
+    if not history:
+        return ""
+
+    formatted_turns = []
+    for index, (user_question, assistant_answer) in enumerate(history, start=1):
+        formatted_turns.append(
+            f"{index}. User: {user_question}\n   Assistant: {assistant_answer}"
+        )
+
+    return "Conversation History:\n" + "\n\n".join(formatted_turns)
 
 
 def load_vector_store(vector_db_dir: Path) -> Chroma:
@@ -113,15 +134,15 @@ def retrieve_context(
 ) -> Tuple[str, List[Tuple[Document, float]], List[Tuple[Document, float]], List[Tuple[Document, float]]]:
     """Retrieve semantic, keyword, and hybrid results for a question."""
     rewritten_query = rewrite_query(question)
-    semantic_results = vector_store.similarity_search_with_score(rewritten_query, k=top_k * 2)
+    semantic_distances = vector_store.similarity_search_with_score(rewritten_query, k=top_k * 2)
     all_chunks = get_all_chunks(vector_store)
     keyword_results = keyword_search(rewritten_query, all_chunks, top_k=top_k * 2)
-    semantic_results = normalize_semantic_results(semantic_results)
+    semantic_results = normalize_semantic_results(semantic_distances)
     keyword_results = deduplicate_results(keyword_results)
     hybrid_results = hybrid_search(
         rewritten_query,
         all_chunks,
-        semantic_results,
+        semantic_distances,
         top_k=top_k,
         keyword_results=keyword_results,
     )
@@ -129,29 +150,41 @@ def retrieve_context(
     return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], hybrid_results[:top_k]
 
 
-def generate_answer(question: str, context: List[Document]) -> str:
+def generate_answer(
+    question: str,
+    context: List[Document],
+    conversation_history: Deque[Tuple[str, str]] | None = None,
+) -> str:
     """Generate an answer from retrieved context using Ollama, with a safe fallback."""
     if not context:
         return "I could not find that information in the provided documents."
 
     context_text = "\n\n".join(document.page_content for document in context)
-    prompt = f"""You are a helpful assistant.
-
-Answer ONLY using the supplied context.
-
-Guidelines:
-- Synthesize information from multiple relevant chunks when needed.
-- Avoid repeating the same point.
-- Be concise but complete.
-- Do not invent information.
-- If the context does not contain enough evidence, say exactly:
-  'I could not find that information in the provided documents.'
-
-Context:
-{context_text}
-
-Question:
-{question}"""
+    history_text = format_conversation_history(conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS))
+    prompt_sections = [
+        "You are a helpful assistant.",
+        "",
+        "Answer ONLY using the Retrieved Context as factual evidence.",
+        "",
+        "Guidelines:",
+        "- Answer the user's current question directly.",
+        "- Do not change the subject or answer a different question.",
+        "- Synthesize information from multiple relevant chunks when needed.",
+        "- Avoid repeating the same point.",
+        "- Be concise but complete.",
+        "- Do not invent information.",
+        "- Use Conversation History only to resolve references such as 'it' or 'which one'; it is not factual evidence.",
+        "- If the Retrieved Context does not contain enough evidence, say exactly:",
+        "  'I could not find that information in the provided documents.'",
+        "",
+        "Retrieved Context:",
+        context_text,
+        "",
+    ]
+    if history_text:
+        prompt_sections.extend([history_text, ""])
+    prompt_sections.extend(["Question:", question])
+    prompt = "\n".join(prompt_sections)
 
     try:
         response = ollama.generate(model=DEFAULT_MODEL, prompt=prompt)
@@ -251,6 +284,8 @@ def main() -> None:
         print(f"Error loading vector database: {exc}")
         return
 
+    conversation_history: Deque[Tuple[str, str]] = deque(maxlen=MAX_CONVERSATION_TURNS)
+
     while True:
         display_menu()
         try:
@@ -315,8 +350,12 @@ def main() -> None:
             print("\n----------------------------------")
             print("Answer")
             print("----------------------------------")
-            answer_chunks = [chunk for chunk, _ in (hybrid_results or semantic_results)]
-            answer = generate_answer(question, answer_chunks)
+            # Only hybrid-qualified chunks are supplied to the model and cited.
+            # Falling back to unfiltered vector neighbours would reintroduce
+            # irrelevant source attribution.
+            answer_chunks = [chunk for chunk, _ in hybrid_results]
+            answer = generate_answer(question, answer_chunks, conversation_history=conversation_history)
+            update_conversation_history(conversation_history, question, answer)
             print(answer)
             display_sources(answer_chunks)
         elif choice == "2":
