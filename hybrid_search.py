@@ -82,7 +82,10 @@ def hybrid_search(
         # be near the best match instead of being included just because top-k
         # vector search always returns neighbours.
         has_keyword_evidence = key in keyword_map
-        semantically_competitive = best_semantic > 0 and semantic_score >= max(0.35, best_semantic * 0.88)
+        # A vector database always returns nearest neighbours, including for
+        # questions outside the corpus.  Require a meaningful absolute score
+        # as well as proximity to the strongest candidate.
+        semantically_competitive = best_semantic > 0 and semantic_score >= max(0.55, best_semantic * 0.88)
         if not has_keyword_evidence and not semantically_competitive:
             continue
 

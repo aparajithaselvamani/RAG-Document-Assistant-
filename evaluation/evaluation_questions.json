@@ -1,0 +1,14 @@
+[
+  {"id": "direct_01", "type": "direct", "question": "What is RAG?", "expected_source": "rag_basics.txt", "expected_answer_keywords": ["retrieval", ["external documents", "document store", "documents"]], "expected_behavior": "answer_from_documents"},
+  {"id": "direct_02", "type": "direct", "question": "What is semantic search?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["vector", "similarity"], "expected_behavior": "answer_from_documents"},
+  {"id": "direct_03", "type": "direct", "question": "What are embeddings?", "expected_source": "embeddings_and_chroma.txt", "expected_answer_keywords": [["vectors", "vector"], ["semantic meaning", "meaning of text"]], "expected_behavior": "answer_from_documents"},
+  {"id": "direct_04", "type": "direct", "question": "What is hybrid search?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["semantic", "keyword"], "expected_behavior": "answer_from_documents"},
+  {"id": "direct_05", "type": "direct", "question": "How does query rewriting improve retrieval?", "expected_source": "query_rewriting_and_ollama.pdf", "expected_answer_keywords": ["query rewriting", "retrieval"], "expected_behavior": "answer_from_documents"},
+  {"id": "direct_06", "type": "direct", "question": "What is the leave policy?", "expected_source": "upload_test.txt", "expected_answer_keywords": ["paid vacation"], "expected_behavior": "answer_from_documents"},
+  {"id": "followup_01", "type": "follow_up", "question": "How is it different from keyword search?", "history": ["What is semantic search?"], "expected_source": "search_methods.txt", "expected_answer_keywords": ["vector", "lexical"], "expected_behavior": "answer_from_documents"},
+  {"id": "followup_02", "type": "follow_up", "question": "Which one uses embeddings?", "history": ["What is semantic search?", "How is it different from keyword search?"], "expected_source": "search_methods.txt", "expected_answer_keywords": ["semantic"], "expected_behavior": "answer_from_documents"},
+  {"id": "followup_03", "type": "follow_up", "question": "How far in advance should employees request it?", "history": ["What is the leave policy?"], "expected_source": "upload_test.txt", "expected_answer_keywords": ["two weeks"], "expected_behavior": "answer_from_documents"},
+  {"id": "no_info_01", "type": "no_relevant_information", "question": "What is the capital of France?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_02", "type": "no_relevant_information", "question": "Explain quantum computing.", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_03", "type": "no_relevant_information", "question": "What is the population of Japan?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"}
+]

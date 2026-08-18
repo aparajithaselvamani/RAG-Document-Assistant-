@@ -95,3 +95,23 @@ Example:
 - User: How does it work?
 
 The second answer can use the recent exchange to interpret "it" more accurately while still relying on the same retrieved documents.
+
+## Evaluation
+
+The project includes a small repeatable evaluation suite to check grounded retrieval and answers against the documents currently indexed. It contains 12 cases: direct document questions, multi-turn follow-up questions that replay conversation history, and no-information questions that must be rejected rather than answered from general knowledge.
+
+Run the evaluation after ingesting the documents and starting Ollama:
+
+```bash
+python evaluation/evaluate_rag.py
+```
+
+The runner uses the normal retrieval and answer-generation functions, then reports source retrieval, required answer-keyword coverage, and whether unsupported questions received the application's grounded fallback. Its summary is designed for demonstrations:
+
+```text
+RAG EVALUATION RESULTS
+Total tests: 12
+Passed: 10
+Failed: 2
+Pass rate: 83.3%
+```

@@ -45,6 +45,63 @@ def format_conversation_history(history: Deque[Tuple[str, str]]) -> str:
     return "Conversation History:\n" + "\n\n".join(formatted_turns)
 
 
+def _question_subject(question: str) -> str:
+    """Extract the subject of a simple prior user question for reference resolution."""
+    cleaned = re.sub(r"\s+", " ", (question or "").strip()).rstrip("?.! ")
+    match = re.match(r"(?:what|who)\s+(?:is|are)\s+(.+)", cleaned, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    match = re.match(r"(?:explain|define|tell me about)\s+(.+)", cleaned, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _recent_subject(history: Deque[Tuple[str, str]], before_index: int | None = None) -> str:
+    """Find the latest explicit user-question subject, never using assistant answers."""
+    questions = [user_question for user_question, _ in history]
+    if before_index is not None:
+        questions = questions[:before_index]
+    for prior_question in reversed(questions):
+        subject = _question_subject(prior_question)
+        if subject:
+            return subject
+    return ""
+
+
+def resolve_follow_up_question(question: str, history: Deque[Tuple[str, str]] | None = None) -> str:
+    """Resolve a small set of ambiguous follow-up references from prior user questions.
+
+    This does not add facts or alter retrieval.  It only restates the user's
+    current intent so answer generation can select the right retrieved evidence.
+    """
+    current_question = (question or "").strip()
+    if not current_question or not history:
+        return current_question
+
+    normalized = current_question.lower()
+    if not re.search(r"\b(it|they|that|which one|which of them|the first one|the second one)\b", normalized):
+        return current_question
+
+    prior_questions = [user_question for user_question, _ in history]
+    latest_question = prior_questions[-1] if prior_questions else ""
+    comparison = re.search(r"\bdifferent\s+from\s+(.+?)[?.!]*$", latest_question, flags=re.IGNORECASE)
+    if re.search(r"\b(which one|which of them)\b", normalized) and comparison:
+        second_subject = comparison.group(1).strip().rstrip("?.! ")
+        first_subject = _recent_subject(history, before_index=len(prior_questions) - 1)
+        if first_subject and second_subject:
+            return re.sub(
+                r"\b(which one|which of them)\b",
+                f"Which of {first_subject} and {second_subject}",
+                current_question,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+
+    subject = _recent_subject(history)
+    if subject:
+        return re.sub(r"\bit\b", subject, current_question, flags=re.IGNORECASE)
+    return current_question
+
+
 def load_vector_store(vector_db_dir: Path) -> Chroma:
     """Load a persistent Chroma vector store from disk."""
     if not vector_db_dir.exists():
@@ -160,7 +217,9 @@ def generate_answer(
         return "I could not find that information in the provided documents."
 
     context_text = "\n\n".join(document.page_content for document in context)
-    history_text = format_conversation_history(conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS))
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+    history_text = format_conversation_history(history)
+    resolved_question = resolve_follow_up_question(question, history)
     prompt_sections = [
         "You are a helpful assistant.",
         "",
@@ -174,6 +233,8 @@ def generate_answer(
         "- Be concise but complete.",
         "- Do not invent information.",
         "- Use Conversation History only to resolve references such as 'it' or 'which one'; it is not factual evidence.",
+        "- If a Resolved Current Question is supplied, it only clarifies the subject of the user's question.",
+        "- For 'which one' after a comparison, answer about the compared subjects, not an unrelated term in Retrieved Context.",
         "- If the Retrieved Context does not contain enough evidence, say exactly:",
         "  'I could not find that information in the provided documents.'",
         "",
@@ -182,8 +243,10 @@ def generate_answer(
         "",
     ]
     if history_text:
-        prompt_sections.extend([history_text, ""])
-    prompt_sections.extend(["Question:", question])
+        prompt_sections.extend(["Conversation History (reference resolution only; not factual evidence):", history_text.removeprefix("Conversation History:\n"), ""])
+    prompt_sections.extend(["Current Question:", question])
+    if resolved_question != question:
+        prompt_sections.extend(["", "Resolved Current Question (reference only; verify the answer in Retrieved Context):", resolved_question])
     prompt = "\n".join(prompt_sections)
 
     try:

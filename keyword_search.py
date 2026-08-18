@@ -27,7 +27,8 @@ def keyword_search(query: str, chunks: List[Document], top_k: int = 4) -> List[T
     if not chunks:
         return []
 
-    query_tokens = _tokenize(query)
+    stop_words = {"a", "an", "are", "as", "at", "can", "do", "does", "for", "from", "how", "in", "is", "it", "of", "on", "the", "to", "what", "when", "where", "which", "who", "why", "with"}
+    query_tokens = [token for token in _tokenize(query) if token not in stop_words]
     if not query_tokens:
         return []
 
