@@ -24,6 +24,13 @@ from utils import (
 BASE_DIR = Path(__file__).resolve().parent
 VECTOR_DB_DIR = BASE_DIR / "vector_db" / "chroma"
 MAX_CONVERSATION_TURNS = 5
+NO_INFORMATION_RESPONSE = "I could not find that information in the provided documents."
+GROUNDING_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does",
+    "different", "explain", "for", "from", "how", "in", "is", "it", "of", "on", "one",
+    "or", "should", "that", "the", "their", "them", "they", "this", "to", "use", "uses",
+    "was", "what", "when", "where", "which", "who", "why", "with", "would",
+}
 
 
 def update_conversation_history(history: Deque[Tuple[str, str]], user_question: str, assistant_answer: str) -> None:
@@ -100,6 +107,45 @@ def resolve_follow_up_question(question: str, history: Deque[Tuple[str, str]] | 
     if subject:
         return re.sub(r"\bit\b", subject, current_question, flags=re.IGNORECASE)
     return current_question
+
+
+def _grounding_terms(question: str) -> tuple[set[str], set[str]]:
+    """Return meaningful terms and explicitly named terms from a question."""
+    raw_tokens = re.findall(r"[A-Za-z0-9]+", question or "")
+    meaningful = {token.lower() for token in raw_tokens if token.lower() not in GROUNDING_STOP_WORDS}
+    # A named entity that is absent from the retrieved text is a strong signal
+    # that a superficially similar chunk cannot answer the question.
+    named = {
+        token.lower()
+        for index, token in enumerate(raw_tokens)
+        if index > 0 and (token.isupper() or (token[:1].isupper() and token[1:].islower()))
+        and token.lower() not in GROUNDING_STOP_WORDS
+    }
+    return meaningful, named
+
+
+def has_sufficient_grounding(question: str, context: List[Document]) -> bool:
+    """Check whether hybrid-retrieved chunks contain evidence for the question.
+
+    Retrieval ranking finds plausible neighbours; it does not itself establish
+    that a requested fact appears in the documents.  This deliberately simple,
+    topic-independent check requires the hybrid context to cover enough of the
+    question's material terms and every explicitly named entity.
+    """
+    if not context:
+        return False
+
+    terms, named_terms = _grounding_terms(question)
+    if not terms:
+        return False
+
+    context_terms = set(re.findall(r"[a-z0-9]+", " ".join(chunk.page_content.lower() for chunk in context)))
+    if not named_terms.issubset(context_terms):
+        return False
+
+    matched_terms = terms & context_terms
+    required_matches = max(1, (len(terms) + 1) // 2)
+    return len(matched_terms) >= required_matches
 
 
 def load_vector_store(vector_db_dir: Path) -> Chroma:
@@ -188,9 +234,11 @@ def retrieve_context(
     vector_store: Chroma,
     question: str,
     top_k: int = DEFAULT_TOP_K,
+    conversation_history: Deque[Tuple[str, str]] | None = None,
 ) -> Tuple[str, List[Tuple[Document, float]], List[Tuple[Document, float]], List[Tuple[Document, float]]]:
     """Retrieve semantic, keyword, and hybrid results for a question."""
-    rewritten_query = rewrite_query(question)
+    resolved_question = resolve_follow_up_question(question, conversation_history)
+    rewritten_query = rewrite_query(resolved_question)
     semantic_distances = vector_store.similarity_search_with_score(rewritten_query, k=top_k * 2)
     all_chunks = get_all_chunks(vector_store)
     keyword_results = keyword_search(rewritten_query, all_chunks, top_k=top_k * 2)
@@ -204,6 +252,12 @@ def retrieve_context(
         keyword_results=keyword_results,
     )
 
+    # Hybrid search is the single retrieval pipeline.  Its ranked chunks must
+    # also contain enough question-specific evidence before they are eligible
+    # for answer generation or source attribution.
+    if not has_sufficient_grounding(resolved_question, [document for document, _ in hybrid_results]):
+        hybrid_results = []
+
     return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], hybrid_results[:top_k]
 
 
@@ -214,27 +268,31 @@ def generate_answer(
 ) -> str:
     """Generate an answer from retrieved context using Ollama, with a safe fallback."""
     if not context:
-        return "I could not find that information in the provided documents."
+        return NO_INFORMATION_RESPONSE
+
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+    resolved_question = resolve_follow_up_question(question, history)
+    if not has_sufficient_grounding(resolved_question, context):
+        return NO_INFORMATION_RESPONSE
 
     context_text = "\n\n".join(document.page_content for document in context)
-    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
     history_text = format_conversation_history(history)
-    resolved_question = resolve_follow_up_question(question, history)
     prompt_sections = [
         "You are a helpful assistant.",
         "",
         "Answer ONLY using the Retrieved Context as factual evidence.",
         "",
         "Guidelines:",
-        "- Answer the user's current question directly.",
+        "- Answer the Question to Answer directly.",
         "- Do not change the subject or answer a different question.",
         "- Synthesize information from multiple relevant chunks when needed.",
         "- Avoid repeating the same point.",
         "- Be concise but complete.",
         "- Do not invent information.",
         "- Use Conversation History only to resolve references such as 'it' or 'which one'; it is not factual evidence.",
-        "- If a Resolved Current Question is supplied, it only clarifies the subject of the user's question.",
-        "- For 'which one' after a comparison, answer about the compared subjects, not an unrelated term in Retrieved Context.",
+        "- Conversation History may only resolve references; never treat it as factual evidence.",
+        "- Never use general world knowledge, guess, or infer facts missing from Retrieved Context.",
+        "- When the Question to Answer names comparison candidates, answer only about those candidates, not an unrelated term in Retrieved Context.",
         "- If the Retrieved Context does not contain enough evidence, say exactly:",
         "  'I could not find that information in the provided documents.'",
         "",
@@ -244,9 +302,9 @@ def generate_answer(
     ]
     if history_text:
         prompt_sections.extend(["Conversation History (reference resolution only; not factual evidence):", history_text.removeprefix("Conversation History:\n"), ""])
-    prompt_sections.extend(["Current Question:", question])
+    prompt_sections.extend(["Question to Answer:", resolved_question])
     if resolved_question != question:
-        prompt_sections.extend(["", "Resolved Current Question (reference only; verify the answer in Retrieved Context):", resolved_question])
+        prompt_sections.extend(["", "Original User Wording (reference already resolved above):", question])
     prompt = "\n".join(prompt_sections)
 
     try:
@@ -257,7 +315,7 @@ def generate_answer(
     except Exception:
         pass
 
-    return "I could not find that information in the provided documents."
+    return NO_INFORMATION_RESPONSE
 
 
 def display_search_results(title: str, results: List[Tuple[Document, float]], score_label: str = "Score") -> None:
@@ -380,6 +438,7 @@ def main() -> None:
                 rewritten_query, semantic_results, keyword_results, hybrid_results = retrieve_context(
                     vector_store,
                     question,
+                    conversation_history=conversation_history,
                 )
             except Exception as exc:
                 print(f"Error retrieving context: {exc}")
@@ -420,7 +479,8 @@ def main() -> None:
             answer = generate_answer(question, answer_chunks, conversation_history=conversation_history)
             update_conversation_history(conversation_history, question, answer)
             print(answer)
-            display_sources(answer_chunks)
+            if answer != NO_INFORMATION_RESPONSE:
+                display_sources(answer_chunks)
         elif choice == "2":
             handle_upload(vector_store)
         elif choice == "3":

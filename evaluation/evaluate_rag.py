@@ -83,7 +83,11 @@ def _missing_keyword_groups(answer: str, keywords: List[Any]) -> List[str]:
 
 
 def _run_question(vector_store: Any, question: str, history: Deque[Tuple[str, str]]) -> Dict[str, Any]:
-    rewritten, semantic, keyword, hybrid = app.retrieve_context(vector_store, question)
+    rewritten, semantic, keyword, hybrid = app.retrieve_context(
+        vector_store,
+        question,
+        conversation_history=history,
+    )
     context = [document for document, _ in hybrid]
     answer = app.generate_answer(question, context, conversation_history=history)
     app.update_conversation_history(history, question, answer)

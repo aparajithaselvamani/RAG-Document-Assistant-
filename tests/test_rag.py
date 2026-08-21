@@ -7,7 +7,14 @@ from langchain_core.documents import Document
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app
-from app import format_conversation_history, resolve_follow_up_question, rewrite_query, update_conversation_history
+from app import (
+    NO_INFORMATION_RESPONSE,
+    format_conversation_history,
+    has_sufficient_grounding,
+    resolve_follow_up_question,
+    rewrite_query,
+    update_conversation_history,
+)
 from hybrid_search import hybrid_search, normalize_semantic_results
 from ingest import copy_uploaded_document, index_uploaded_document, validate_uploaded_file
 from keyword_search import keyword_search
@@ -180,7 +187,7 @@ def test_generate_answer_includes_conversation_history_in_prompt(monkeypatch: ob
     assert answer == "A follow-up answer."
     assert "Conversation History (reference resolution only; not factual evidence):" in captured["prompt"]
     assert "User: What is RAG?" in captured["prompt"]
-    assert "Current Question:\nHow does it work?" in captured["prompt"]
+    assert "Question to Answer:\nHow does RAG work?" in captured["prompt"]
 
 
 def test_hybrid_search_filters_irrelevant_documents_for_semantic_search_queries() -> None:
@@ -217,9 +224,9 @@ def test_generate_answer_prompt_anchors_on_the_current_question() -> None:
     answer = app.generate_answer("How is semantic search different from keyword search?", context)
 
     assert answer == "Semantic search ranks by meaning."
-    assert "Answer the user's current question" in captured["prompt"]
+    assert "Answer the Question to Answer" in captured["prompt"]
     assert "Retrieved Context:" in captured["prompt"]
-    assert "Current Question:" in captured["prompt"]
+    assert "Question to Answer:" in captured["prompt"]
 
 
 def test_resolve_follow_up_question_identifies_compared_search_methods() -> None:
@@ -259,9 +266,34 @@ def test_generate_answer_uses_resolved_question_only_for_reference_resolution(mo
     answer = app.generate_answer("Which one uses embeddings?", context, conversation_history=history)
 
     assert answer == "Semantic search uses embeddings."
-    assert "Resolved Current Question (reference only; verify the answer in Retrieved Context):" in captured["prompt"]
+    assert "Question to Answer:" in captured["prompt"]
     assert "Which of semantic search and keyword search uses embeddings?" in captured["prompt"]
     assert "not an unrelated term in Retrieved Context" in captured["prompt"]
+
+
+def test_grounding_check_rejects_empty_and_irrelevant_context() -> None:
+    rag_context = [Document(page_content="RAG uses retrieval from external documents.", metadata={"source": "rag.txt"})]
+
+    assert not has_sufficient_grounding("What is the capital of France?", [])
+    assert not has_sufficient_grounding("What is the population of Japan?", rag_context)
+
+
+def test_grounding_check_rejects_keyword_neighbour_when_named_fact_is_missing() -> None:
+    rag_context = [Document(page_content="RAG retrieves relevant chunks from a document store.", metadata={"source": "rag.txt"})]
+
+    assert not has_sufficient_grounding("What does RAG say about France?", rag_context)
+
+
+def test_generate_answer_rejects_unsupported_context_without_calling_ollama(monkeypatch: object) -> None:
+    history = deque([("What is semantic search?", "Semantic search uses vector similarity.")], maxlen=5)
+    context = [Document(page_content="Semantic search uses vector similarity.", metadata={"source": "search_methods.txt"})]
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise AssertionError("Ollama must not be called for insufficient context")
+
+    monkeypatch.setattr(app.ollama, "generate", fail_if_called)
+
+    assert app.generate_answer("What is the population of Japan?", context, conversation_history=history) == NO_INFORMATION_RESPONSE
 
 
 def test_normalize_semantic_results_converts_lower_distance_to_higher_similarity() -> None:
@@ -294,14 +326,14 @@ def test_display_sources_only_lists_the_chunks_given_to_answer_generation(capsys
 def test_evaluation_dataset_loads_with_required_fields() -> None:
     cases = evaluate_rag.load_evaluation_cases()
 
-    assert len(cases) == 12
+    assert len(cases) == 17
     assert {case["type"] for case in cases} == {"direct", "follow_up", "no_relevant_information"}
     assert all(evaluate_rag.REQUIRED_FIELDS <= set(case) for case in cases)
 
 
 def test_evaluation_direct_case_checks_source_and_answer(monkeypatch: object) -> None:
     document = Document(page_content="RAG uses retrieval and external documents.", metadata={"source": "rag_basics.txt"})
-    monkeypatch.setattr(app, "retrieve_context", lambda *_: ("What is RAG?", [], [], [(document, 0.9)]))
+    monkeypatch.setattr(app, "retrieve_context", lambda *_, **_kwargs: ("What is RAG?", [], [], [(document, 0.9)]))
     monkeypatch.setattr(app, "generate_answer", lambda *_args, **_kwargs: "RAG uses retrieval and external documents.")
     case = {"id": "direct", "type": "direct", "question": "What is RAG?", "expected_source": "rag_basics.txt", "expected_answer_keywords": ["retrieval", "external documents"], "expected_behavior": "answer_from_documents"}
 
@@ -315,7 +347,7 @@ def test_evaluation_follow_up_replays_history(monkeypatch: object) -> None:
     document = Document(page_content="Semantic search uses vectors; keyword search uses lexical overlap.", metadata={"source": "search_methods.txt"})
     asked: list[tuple[str, int]] = []
 
-    def fake_retrieve(_store: object, question: str) -> tuple[str, list[object], list[object], list[tuple[Document, float]]]:
+    def fake_retrieve(_store: object, question: str, **_kwargs: object) -> tuple[str, list[object], list[object], list[tuple[Document, float]]]:
         asked.append((question, 0))
         return question, [], [], [(document, 0.9)]
 
@@ -334,7 +366,7 @@ def test_evaluation_follow_up_replays_history(monkeypatch: object) -> None:
 
 
 def test_evaluation_no_information_requires_empty_sources_and_fallback(monkeypatch: object) -> None:
-    monkeypatch.setattr(app, "retrieve_context", lambda *_: ("capital of France", [], [], []))
+    monkeypatch.setattr(app, "retrieve_context", lambda *_, **_kwargs: ("capital of France", [], [], []))
     monkeypatch.setattr(app, "generate_answer", lambda *_args, **_kwargs: "I could not find that information in the provided documents.")
     case = {"id": "none", "type": "no_relevant_information", "question": "What is the capital of France?", "expected_source": None, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"}
 
@@ -359,7 +391,7 @@ def test_evaluation_summary_counts_passes_and_failures() -> None:
 def test_evaluation_normalizes_full_path_sources_and_matches_any_rank(monkeypatch: object) -> None:
     first = Document(page_content="Embeddings use vectors.", metadata={"source": "C:\\RAG_ASSISTANT\\documents\\embeddings_and_chroma.txt"})
     expected = Document(page_content="Semantic search uses vector similarity.", metadata={"source": "C:\\RAG_ASSISTANT\\documents\\search_methods.txt"})
-    monkeypatch.setattr(app, "retrieve_context", lambda *_: ("semantic", [], [], [(first, 0.9), (expected, 0.8)]))
+    monkeypatch.setattr(app, "retrieve_context", lambda *_, **_kwargs: ("semantic", [], [], [(first, 0.9), (expected, 0.8)]))
     monkeypatch.setattr(app, "generate_answer", lambda *_args, **_kwargs: "Semantic search uses vector similarity.")
     case = {"id": "path", "type": "direct", "question": "What is semantic search?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["vector similarity"], "expected_behavior": "answer_from_documents"}
 
@@ -383,7 +415,7 @@ def test_evaluation_accepts_document_store_as_direct_rag_evidence() -> None:
 
 def test_evaluation_follow_up_matches_normalized_source(monkeypatch: object) -> None:
     document = Document(page_content="Semantic search uses embeddings.", metadata={"source": "C:\\docs\\search_methods.txt"})
-    monkeypatch.setattr(app, "retrieve_context", lambda *_: ("semantic", [], [], [(document, 0.9)]))
+    monkeypatch.setattr(app, "retrieve_context", lambda *_, **_kwargs: ("semantic", [], [], [(document, 0.9)]))
     monkeypatch.setattr(app, "generate_answer", lambda *_args, **_kwargs: "Semantic search uses embeddings.")
     case = {"id": "follow-path", "type": "follow_up", "question": "Which one uses embeddings?", "history": ["What is semantic search?"], "expected_source": "search_methods.txt", "expected_answer_keywords": ["semantic", "embeddings"], "expected_behavior": "answer_from_documents"}
 

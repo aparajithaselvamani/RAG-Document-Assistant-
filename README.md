@@ -115,3 +115,13 @@ Passed: 10
 Failed: 2
 Pass rate: 83.3%
 ```
+
+## Out-of-Scope Question Handling
+
+Vector search can return nearby chunks even when the documents do not contain an answer. The assistant therefore treats hybrid retrieval as a candidate set, checks that the selected chunks cover the question's material terms (including named entities), and only then calls Ollama. If the evidence is insufficient, it returns:
+
+```text
+I could not find that information in the provided documents.
+```
+
+Conversation history can resolve references such as `it` or `which one`, but it is never used as factual evidence. The evaluation suite includes unsupported questions with no matches as well as questions with lexical or semantic neighbours, ensuring the assistant rejects unsupported answers instead of attributing unrelated sources.

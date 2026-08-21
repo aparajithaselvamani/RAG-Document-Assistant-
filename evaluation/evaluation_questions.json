@@ -10,5 +10,10 @@
   {"id": "followup_03", "type": "follow_up", "question": "How far in advance should employees request it?", "history": ["What is the leave policy?"], "expected_source": "upload_test.txt", "expected_answer_keywords": ["two weeks"], "expected_behavior": "answer_from_documents"},
   {"id": "no_info_01", "type": "no_relevant_information", "question": "What is the capital of France?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
   {"id": "no_info_02", "type": "no_relevant_information", "question": "Explain quantum computing.", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
-  {"id": "no_info_03", "type": "no_relevant_information", "question": "What is the population of Japan?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"}
+  {"id": "no_info_03", "type": "no_relevant_information", "question": "What is the population of Japan?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_04", "type": "no_relevant_information", "question": "Who is the current president of the United States?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_05", "type": "no_relevant_information", "question": "What is today's weather?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_06", "type": "no_relevant_information", "question": "What does RAG say about France?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_07", "type": "no_relevant_information", "question": "Explain the Python programming language.", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "no_info_08", "type": "no_relevant_information", "question": "What is the exchange rate for the Japanese yen?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"}
 ]
