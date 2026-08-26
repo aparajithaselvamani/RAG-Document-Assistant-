@@ -84,6 +84,31 @@ python app.py
 - What is hybrid search?
 - What is query rewriting?
 
+## Query Classification
+
+Before retrieval, the assistant classifies each question into one of three categories:
+
+1. DOCUMENT_RELATED
+2. FOLLOW_UP
+3. GENERAL_OR_UNRELATED
+
+The routing is intentionally explicit:
+
+- DOCUMENT_RELATED → document retrieval → hybrid search → grounded answer
+- FOLLOW_UP → conversation history + resolved question → document retrieval → grounded answer
+- GENERAL_OR_UNRELATED → no document retrieval → grounded fallback response
+
+This happens before any embedding or vector search for unrelated requests, so off-topic questions do not trigger unnecessary retrieval.
+
+Example:
+
+- User: What is RAG?
+- Classification: DOCUMENT_RELATED
+- User: How is it different from keyword search?
+- Classification: FOLLOW_UP, using recent conversation history to resolve "it"
+- User: What is the capital of France?
+- Classification: GENERAL_OR_UNRELATED, returning the grounded fallback without retrieval
+
 ## Conversation Memory
 
 The assistant now keeps a short-term memory of the most recent user/assistant exchanges while the app is running. It uses a bounded deque of up to five turns, so follow-up questions can be answered with context from the recent conversation without changing the retrieval pipeline.

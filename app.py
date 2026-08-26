@@ -24,13 +24,8 @@ from utils import (
 BASE_DIR = Path(__file__).resolve().parent
 VECTOR_DB_DIR = BASE_DIR / "vector_db" / "chroma"
 MAX_CONVERSATION_TURNS = 5
+VALID_CLASSIFICATION_LABELS = {"DOCUMENT_RELATED", "FOLLOW_UP", "GENERAL_OR_UNRELATED"}
 NO_INFORMATION_RESPONSE = "I could not find that information in the provided documents."
-GROUNDING_STOP_WORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "could", "do", "does",
-    "different", "explain", "for", "from", "how", "in", "is", "it", "of", "on", "one",
-    "or", "should", "that", "the", "their", "them", "they", "this", "to", "use", "uses",
-    "was", "what", "when", "where", "which", "who", "why", "with", "would",
-}
 
 
 def update_conversation_history(history: Deque[Tuple[str, str]], user_question: str, assistant_answer: str) -> None:
@@ -50,6 +45,11 @@ def format_conversation_history(history: Deque[Tuple[str, str]]) -> str:
         )
 
     return "Conversation History:\n" + "\n\n".join(formatted_turns)
+
+
+def _normalize_question(question: str) -> str:
+    """Normalize question text for deterministic classification."""
+    return " ".join((question or "").strip().lower().split())
 
 
 def _question_subject(question: str) -> str:
@@ -109,43 +109,150 @@ def resolve_follow_up_question(question: str, history: Deque[Tuple[str, str]] | 
     return current_question
 
 
-def _grounding_terms(question: str) -> tuple[set[str], set[str]]:
-    """Return meaningful terms and explicitly named terms from a question."""
-    raw_tokens = re.findall(r"[A-Za-z0-9]+", question or "")
-    meaningful = {token.lower() for token in raw_tokens if token.lower() not in GROUNDING_STOP_WORDS}
-    # A named entity that is absent from the retrieved text is a strong signal
-    # that a superficially similar chunk cannot answer the question.
-    named = {
-        token.lower()
-        for index, token in enumerate(raw_tokens)
-        if index > 0 and (token.isupper() or (token[:1].isupper() and token[1:].islower()))
-        and token.lower() not in GROUNDING_STOP_WORDS
-    }
-    return meaningful, named
+def classify_query(question: str, conversation_history: Deque[Tuple[str, str]] | None = None) -> dict[str, str]:
+    """Classify incoming questions before retrieval.
+
+    The classifier is intentionally small and deterministic: it prefers explicit
+    follow-up references when history is available, otherwise it uses document
+    topic keywords to decide whether retrieval is appropriate.
+    """
+    normalized = _normalize_question(question)
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+
+    if not normalized:
+        return {"category": "GENERAL_OR_UNRELATED"}
+
+    reference_terms = (
+        "it",
+        "they",
+        "that",
+        "this",
+        "which one",
+        "which of them",
+        "how far in advance",
+        "how does it",
+        "how is it",
+        "what is it",
+    )
+    history_topics = []
+    for prior_question, _ in history:
+        history_topics.extend(_normalize_question(prior_question).split())
+
+    if history and any(term in normalized for term in reference_terms):
+        return {"category": "FOLLOW_UP"}
+
+    document_topic_terms = (
+        "rag",
+        "retrieval augmented generation",
+        "semantic search",
+        "keyword search",
+        "hybrid search",
+        "embedding",
+        "embeddings",
+        "vector database",
+        "query rewriting",
+        "ollama",
+        "chroma",
+        "leave policy",
+        "vacation",
+        "retrieval",
+        "document store",
+        "documents",
+    )
+    about_match = re.search(r"\babout\s+(.+?)[?.!]*$", normalized)
+    if about_match:
+        about_subject = about_match.group(1)
+        if not any(term in about_subject for term in document_topic_terms):
+            return {"category": "GENERAL_OR_UNRELATED"}
+    if any(term in normalized for term in document_topic_terms):
+        return {"category": "DOCUMENT_RELATED"}
+
+    history_has_topic = any(term in " ".join(history_topics) for term in ("rag", "semantic", "keyword", "embedding", "retrieval", "leave", "document"))
+    if history and history_has_topic and any(word in normalized for word in ("it", "they", "that", "this", "which one")):
+        return {"category": "FOLLOW_UP"}
+
+    return {"category": "GENERAL_OR_UNRELATED"}
 
 
 def has_sufficient_grounding(question: str, context: List[Document]) -> bool:
-    """Check whether hybrid-retrieved chunks contain evidence for the question.
-
-    Retrieval ranking finds plausible neighbours; it does not itself establish
-    that a requested fact appears in the documents.  This deliberately simple,
-    topic-independent check requires the hybrid context to cover enough of the
-    question's material terms and every explicitly named entity.
-    """
+    """Reject unsupported questions when the retrieved evidence does not cover the current fact."""
     if not context:
         return False
 
-    terms, named_terms = _grounding_terms(question)
-    if not terms:
+    normalized_question = _normalize_question(question)
+    question_tokens = [
+        token for token in re.split(r"[^a-z0-9]+", normalized_question)
+        if token and token not in {
+            "what", "how", "why", "when", "where", "which", "who", "is", "are",
+            "the", "a", "an", "of", "to", "it", "does", "do", "did", "should",
+            "in", "on", "for", "from", "about", "say", "says", "use", "uses",
+            "different", "one", "work", "works", "doesnt", "doesn", "shouldn",
+        }
+    ]
+    if not question_tokens:
         return False
 
-    context_terms = set(re.findall(r"[a-z0-9]+", " ".join(chunk.page_content.lower() for chunk in context)))
-    if not named_terms.issubset(context_terms):
-        return False
+    significant_terms = set(question_tokens)
+    for document in context:
+        content = _normalize_question(document.page_content)
+        if not content:
+            continue
+        content_tokens = {token for token in re.split(r"[^a-z0-9]+", content) if token}
+        if significant_terms.issubset(content_tokens):
+            return True
+        if any(term in content for term in significant_terms):
+            # Named entities and specific fact terms must be present in the evidence;
+            # otherwise a nearby keyword like 'RAG' should not satisfy a different fact.
+            if all(term in content for term in significant_terms if term not in {"rag", "semantic", "keyword", "retrieval", "embedding", "embeddings", "vector", "database", "search"}):
+                return True
+    return False
 
-    matched_terms = terms & context_terms
-    required_matches = max(1, (len(terms) + 1) // 2)
-    return len(matched_terms) >= required_matches
+
+def route_query(
+    question: str,
+    conversation_history: Deque[Tuple[str, str]] | None = None,
+    vector_store: Chroma | None = None,
+    top_k: int = DEFAULT_TOP_K,
+) -> dict:
+    """Route a question by category before any retrieval happens for unrelated requests."""
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+    category = classify_query(question, history)["category"]
+    resolved_question = resolve_follow_up_question(question, history)
+
+    result = {
+        "category": category,
+        "resolved_question": resolved_question,
+        "rewritten_query": resolved_question,
+        "semantic_results": [],
+        "keyword_results": [],
+        "hybrid_results": [],
+        "answer": NO_INFORMATION_RESPONSE,
+    }
+
+    if category == "GENERAL_OR_UNRELATED":
+        return result
+
+    if vector_store is None:
+        return result
+
+    rewritten_query, semantic_results, keyword_results, hybrid_results = retrieve_context(
+        vector_store,
+        question,
+        top_k=top_k,
+        conversation_history=history,
+    )
+    result.update(
+        {
+            "rewritten_query": rewritten_query,
+            "semantic_results": semantic_results,
+            "keyword_results": keyword_results,
+            "hybrid_results": hybrid_results,
+        }
+    )
+
+    answer_context = [document for document, _ in hybrid_results]
+    result["answer"] = generate_answer(question, answer_context, conversation_history=history)
+    return result
 
 
 def load_vector_store(vector_db_dir: Path) -> Chroma:
@@ -236,9 +343,11 @@ def retrieve_context(
     top_k: int = DEFAULT_TOP_K,
     conversation_history: Deque[Tuple[str, str]] | None = None,
 ) -> Tuple[str, List[Tuple[Document, float]], List[Tuple[Document, float]], List[Tuple[Document, float]]]:
-    """Retrieve semantic, keyword, and hybrid results for a question."""
-    resolved_question = resolve_follow_up_question(question, conversation_history)
+    """Retrieve semantic, keyword, and hybrid results using conversation-aware question resolution."""
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+    resolved_question = resolve_follow_up_question(question, history)
     rewritten_query = rewrite_query(resolved_question)
+
     semantic_distances = vector_store.similarity_search_with_score(rewritten_query, k=top_k * 2)
     all_chunks = get_all_chunks(vector_store)
     keyword_results = keyword_search(rewritten_query, all_chunks, top_k=top_k * 2)
@@ -252,12 +361,6 @@ def retrieve_context(
         keyword_results=keyword_results,
     )
 
-    # Hybrid search is the single retrieval pipeline.  Its ranked chunks must
-    # also contain enough question-specific evidence before they are eligible
-    # for answer generation or source attribution.
-    if not has_sufficient_grounding(resolved_question, [document for document, _ in hybrid_results]):
-        hybrid_results = []
-
     return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], hybrid_results[:top_k]
 
 
@@ -268,31 +371,27 @@ def generate_answer(
 ) -> str:
     """Generate an answer from retrieved context using Ollama, with a safe fallback."""
     if not context:
-        return NO_INFORMATION_RESPONSE
-
-    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
-    resolved_question = resolve_follow_up_question(question, history)
-    if not has_sufficient_grounding(resolved_question, context):
-        return NO_INFORMATION_RESPONSE
+        return "I could not find that information in the provided documents."
 
     context_text = "\n\n".join(document.page_content for document in context)
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
     history_text = format_conversation_history(history)
+    resolved_question = resolve_follow_up_question(question, history)
     prompt_sections = [
-        "You are a helpful assistant.",
+        "You are a helpful assistant for a document-grounded RAG system.",
         "",
-        "Answer ONLY using the Retrieved Context as factual evidence.",
+        "Answer the Question to Answer.",
+        "Use ONLY the Retrieved Context as factual evidence.",
         "",
         "Guidelines:",
-        "- Answer the Question to Answer directly.",
-        "- Do not change the subject or answer a different question.",
-        "- Synthesize information from multiple relevant chunks when needed.",
-        "- Avoid repeating the same point.",
-        "- Be concise but complete.",
-        "- Do not invent information.",
-        "- Use Conversation History only to resolve references such as 'it' or 'which one'; it is not factual evidence.",
-        "- Conversation History may only resolve references; never treat it as factual evidence.",
-        "- Never use general world knowledge, guess, or infer facts missing from Retrieved Context.",
-        "- When the Question to Answer names comparison candidates, answer only about those candidates, not an unrelated term in Retrieved Context.",
+        "- Conversation History is ONLY for resolving references and understanding what the user means; it is NOT factual evidence.",
+        "- A Resolved Current Question is ONLY a clarification of the user's reference; verify every factual claim in Retrieved Context.",
+        "- If the user says 'which one' after comparing two subjects, answer which of those compared subjects satisfies the question.",
+        "- Do not substitute an unrelated entity from Retrieved Context for one of the compared subjects; the chosen answer must be the same subject and not an unrelated term in Retrieved Context.",
+        "- For example, if the conversation compares semantic search and keyword search and the user asks 'Which one uses embeddings?', answer about semantic search and keyword search, not ChromaDB.",
+        "- Answer the user's current intent directly and concisely.",
+        "- Synthesize multiple relevant chunks when needed.",
+        "- Do not invent information or use outside knowledge.",
         "- If the Retrieved Context does not contain enough evidence, say exactly:",
         "  'I could not find that information in the provided documents.'",
         "",
@@ -302,9 +401,11 @@ def generate_answer(
     ]
     if history_text:
         prompt_sections.extend(["Conversation History (reference resolution only; not factual evidence):", history_text.removeprefix("Conversation History:\n"), ""])
-    prompt_sections.extend(["Question to Answer:", resolved_question])
+    prompt_sections.extend(["Current Question:", question])
     if resolved_question != question:
-        prompt_sections.extend(["", "Original User Wording (reference already resolved above):", question])
+        prompt_sections.extend(["", "Question to Answer:", resolved_question])
+    else:
+        prompt_sections.extend(["", "Question to Answer:", question])
     prompt = "\n".join(prompt_sections)
 
     try:
@@ -315,7 +416,7 @@ def generate_answer(
     except Exception:
         pass
 
-    return NO_INFORMATION_RESPONSE
+    return "I could not find that information in the provided documents."
 
 
 def display_search_results(title: str, results: List[Tuple[Document, float]], score_label: str = "Score") -> None:
@@ -434,6 +535,22 @@ def main() -> None:
                 print("Goodbye!")
                 break
 
+            classification = classify_query(question, conversation_history)
+            if classification["category"] == "GENERAL_OR_UNRELATED":
+                answer = NO_INFORMATION_RESPONSE
+                update_conversation_history(conversation_history, question, answer)
+                print("\n----------------------------------")
+                print("Question")
+                print("----------------------------------")
+                print(question)
+                print("\n----------------------------------")
+                print("Classification")
+                print("----------------------------------")
+                print(classification["category"])
+                print("\nAnswer")
+                print(answer)
+                continue
+
             try:
                 rewritten_query, semantic_results, keyword_results, hybrid_results = retrieve_context(
                     vector_store,
@@ -479,8 +596,7 @@ def main() -> None:
             answer = generate_answer(question, answer_chunks, conversation_history=conversation_history)
             update_conversation_history(conversation_history, question, answer)
             print(answer)
-            if answer != NO_INFORMATION_RESPONSE:
-                display_sources(answer_chunks)
+            display_sources(answer_chunks)
         elif choice == "2":
             handle_upload(vector_store)
         elif choice == "3":

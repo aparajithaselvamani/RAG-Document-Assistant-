@@ -9,10 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
 from app import (
     NO_INFORMATION_RESPONSE,
+    classify_query,
     format_conversation_history,
     has_sufficient_grounding,
     resolve_follow_up_question,
     rewrite_query,
+    route_query,
     update_conversation_history,
 )
 from hybrid_search import hybrid_search, normalize_semantic_results
@@ -85,6 +87,88 @@ def test_index_uploaded_document_works_with_vector_stores_without_persist(tmp_pa
     assert chunk_count == 1
     assert indexed_count == 1
     assert len(vector_store.added_documents) == 1
+
+
+def test_classify_query_document_related_questions() -> None:
+    assert classify_query("What is RAG?")["category"] == "DOCUMENT_RELATED"
+    assert classify_query("What is semantic search?")["category"] == "DOCUMENT_RELATED"
+    assert classify_query("What are embeddings?")["category"] == "DOCUMENT_RELATED"
+
+
+def test_classify_query_follow_up_questions() -> None:
+    history = deque([
+        ("What is semantic search?", "Semantic search uses vector similarity."),
+    ], maxlen=5)
+    assert classify_query("How is it different from keyword search?", history)["category"] == "FOLLOW_UP"
+
+    history = deque([
+        ("What is semantic search?", "Semantic search uses vector similarity."),
+        ("How is it different from keyword search?", "Keyword search uses lexical overlap."),
+    ], maxlen=5)
+    assert classify_query("Which one uses embeddings?", history)["category"] == "FOLLOW_UP"
+
+    leave_history = deque([
+        ("What is the leave policy?", "The leave policy allows paid vacation days."),
+    ], maxlen=5)
+    assert classify_query("How far in advance should employees request it?", leave_history)["category"] == "FOLLOW_UP"
+
+
+def test_classify_query_general_or_unrelated_questions() -> None:
+    assert classify_query("What is the capital of France?")["category"] == "GENERAL_OR_UNRELATED"
+    assert classify_query("Explain quantum computing.")["category"] == "GENERAL_OR_UNRELATED"
+    assert classify_query("What is today's weather?")["category"] == "GENERAL_OR_UNRELATED"
+    assert classify_query("What is the population of Japan?")["category"] == "GENERAL_OR_UNRELATED"
+    assert classify_query("What does RAG say about France?")["category"] == "GENERAL_OR_UNRELATED"
+    assert classify_query("Explain the Python programming language.")["category"] == "GENERAL_OR_UNRELATED"
+
+
+def test_route_query_skips_retrieval_for_general_questions(monkeypatch: object) -> None:
+    calls = {"retrieval": 0}
+
+    def fake_retrieve(*_args: object, **_kwargs: object) -> tuple[str, list[object], list[object], list[tuple[Document, float]]]:
+        calls["retrieval"] += 1
+        return "capital of France", [], [], []
+
+    monkeypatch.setattr(app, "retrieve_context", fake_retrieve)
+    result = route_query("What is the capital of France?", deque(maxlen=5), vector_store=object())
+
+    assert result["category"] == "GENERAL_OR_UNRELATED"
+    assert result["answer"] == NO_INFORMATION_RESPONSE
+    assert calls["retrieval"] == 0
+
+
+def test_route_query_skips_retrieval_for_unsupported_rag_subject(monkeypatch: object) -> None:
+    calls = {"retrieval": 0}
+
+    def fake_retrieve(*_args: object, **_kwargs: object) -> tuple[str, list[object], list[object], list[tuple[Document, float]]]:
+        calls["retrieval"] += 1
+        return "", [], [], []
+
+    monkeypatch.setattr(app, "retrieve_context", fake_retrieve)
+    result = route_query("What does RAG say about France?", deque(maxlen=5), vector_store=object())
+
+    assert result["category"] == "GENERAL_OR_UNRELATED"
+    assert result["hybrid_results"] == []
+    assert result["answer"] == NO_INFORMATION_RESPONSE
+    assert calls["retrieval"] == 0
+
+
+def test_route_query_uses_history_for_follow_up_and_retrieves_documents(monkeypatch: object) -> None:
+    history = deque([
+        ("What is semantic search?", "Semantic search uses vector similarity."),
+    ], maxlen=5)
+    calls = {"retrieval": 0}
+
+    def fake_retrieve(*_args: object, **_kwargs: object) -> tuple[str, list[object], list[object], list[tuple[Document, float]]]:
+        calls["retrieval"] += 1
+        return "How is semantic search different from keyword search?", [], [], [(Document(page_content="Semantic search uses embeddings.", metadata={"source": "search_methods.txt"}), 0.9)]
+
+    monkeypatch.setattr(app, "retrieve_context", fake_retrieve)
+    result = route_query("How is it different from keyword search?", history, vector_store=object())
+
+    assert result["category"] == "FOLLOW_UP"
+    assert calls["retrieval"] == 1
+    assert result["resolved_question"] == "How is semantic search different from keyword search?"
 
 
 def test_rewrite_query_expands_known_abbreviation() -> None:
@@ -326,9 +410,13 @@ def test_display_sources_only_lists_the_chunks_given_to_answer_generation(capsys
 def test_evaluation_dataset_loads_with_required_fields() -> None:
     cases = evaluate_rag.load_evaluation_cases()
 
-    assert len(cases) == 17
-    assert {case["type"] for case in cases} == {"direct", "follow_up", "no_relevant_information"}
-    assert all(evaluate_rag.REQUIRED_FIELDS <= set(case) for case in cases)
+    assert len(cases) >= 27
+    assert {case["type"] for case in cases} >= {"direct", "follow_up", "no_relevant_information"}
+    assert all(
+        (case["type"] in {"classification", "classification_followup"} and "expected_category" in case)
+        or (case["type"] in {"direct", "follow_up", "no_relevant_information"} and evaluate_rag.REQUIRED_FIELDS <= set(case))
+        for case in cases
+    )
 
 
 def test_evaluation_direct_case_checks_source_and_answer(monkeypatch: object) -> None:
@@ -405,6 +493,15 @@ def test_evaluation_keyword_matching_is_case_and_whitespace_insensitive() -> Non
     answer = "Embeddings are VECTORS that capture the\n semantic   meaning of text."
 
     assert evaluate_rag.keyword_coverage(answer, [["vectors", "vector"], "semantic meaning"])
+
+
+def test_evaluation_direct_embeddings_accepts_text_representation_wording() -> None:
+    answer = "Embeddings are text representations that capture semantic meaning, allowing systems to find related content even when the wording differs."
+
+    assert evaluate_rag.keyword_coverage(
+        answer,
+        [["vectors", "vector", "text representations", "numerical representations"], ["semantic meaning", "meaning of text"]],
+    )
 
 
 def test_evaluation_accepts_document_store_as_direct_rag_evidence() -> None:
