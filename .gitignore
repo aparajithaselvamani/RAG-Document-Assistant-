@@ -3,5 +3,3 @@ __pycache__/
 .venv/
 vector_db/
 *.log
-
-.tmp_pytest/
