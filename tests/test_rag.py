@@ -517,3 +517,123 @@ def test_evaluation_follow_up_matches_normalized_source(monkeypatch: object) -> 
     case = {"id": "follow-path", "type": "follow_up", "question": "Which one uses embeddings?", "history": ["What is semantic search?"], "expected_source": "search_methods.txt", "expected_answer_keywords": ["semantic", "embeddings"], "expected_behavior": "answer_from_documents"}
 
     assert evaluate_rag.evaluate_case(object(), case)["passed"]
+
+
+# ---------------------------------------------------------------------------
+# Retrieval-quality changes: sentence-aligned chunking, BM25 keyword scoring,
+# stricter hybrid gate, and back-reference context expansion.
+# ---------------------------------------------------------------------------
+from hybrid_search import expand_with_context  # noqa: E402
+from ingest import chunk_text, split_documents  # noqa: E402
+
+
+def test_chunk_text_splits_concepts_and_keeps_back_references_together() -> None:
+    text = (
+        "\ufeffEmbeddings convert text into vectors that capture semantic meaning.\n"
+        "These vectors allow systems to find related content even when the wording differs.\n"
+        "ChromaDB is a vector database that stores embeddings."
+    )
+
+    chunks = chunk_text(text)
+
+    assert chunks == [
+        "Embeddings convert text into vectors that capture semantic meaning. These vectors allow systems to find related content even when the wording differs.",
+        "ChromaDB is a vector database that stores embeddings.",
+    ]
+
+
+def test_split_documents_records_position_within_each_source() -> None:
+    documents = [
+        Document(page_content="Semantic search uses vector similarity between passages. Keyword search uses lexical overlap between words.", metadata={"source": "a.txt"}),
+        Document(page_content="The leave policy allows paid vacation days.", metadata={"source": "b.txt"}),
+    ]
+
+    chunks = split_documents(documents)
+
+    assert [(c.metadata["source"], c.metadata["chunk_index"]) for c in chunks] == [("a.txt", 0), ("a.txt", 1), ("b.txt", 0)]
+    assert [c.metadata["chunk_id"] for c in chunks] == [0, 1, 2]
+
+
+def test_keyword_search_ignores_stop_word_overlap() -> None:
+    chunks = [
+        Document(page_content="The system retrieves chunks and passes them to the model.", metadata={"source": "rag.txt"}),
+        Document(page_content="Keyword search uses lexical overlap.", metadata={"source": "search.txt"}),
+    ]
+
+    results = keyword_search("semantic and keyword search", chunks, top_k=4)
+
+    assert [doc.metadata["source"] for doc, _ in results] == ["search.txt"]
+
+
+def test_hybrid_search_drops_chunk_that_only_shares_a_generic_word() -> None:
+    rag = Document(page_content="Retrieval-Augmented Generation, or RAG, helps language models answer questions.", metadata={"source": "rag_basics.txt", "chunk_index": 0})
+    pdf = Document(page_content="Query rewriting improves retrieval.", metadata={"source": "query_rewriting_and_ollama.pdf", "chunk_index": 0})
+    # Distances measured with all-MiniLM-L6-v2 for the rewritten "What is RAG?" query.
+    semantic_results = [(rag, 0.707), (pdf, 1.347)]
+
+    results = hybrid_search("What is Retrieval-Augmented Generation (RAG)?", [rag, pdf], semantic_results, top_k=4)
+
+    assert [doc.metadata["source"] for doc, _ in results] == ["rag_basics.txt"]
+
+
+def test_hybrid_search_rescues_rare_exact_term_when_embeddings_are_unsure() -> None:
+    keyword = Document(page_content="Keyword search uses term statistics such as TF-IDF or BM25.", metadata={"source": "search_methods.txt", "chunk_index": 1})
+    other = Document(page_content="Embeddings convert text into vectors.", metadata={"source": "embeddings.txt", "chunk_index": 0})
+    # Both below the semantic floor (similarity < 0.5): only lexical evidence can decide.
+    semantic_results = [(other, 1.35), (keyword, 1.40)]
+
+    results = hybrid_search("What is BM25?", [keyword, other], semantic_results, top_k=4)
+
+    assert [doc.metadata["source"] for doc, _ in results] == ["search_methods.txt"]
+
+
+def test_expand_with_context_adds_referenced_sentences_in_document_order() -> None:
+    chunks = [
+        Document(page_content="Semantic search uses vector similarity.", metadata={"source": "search_methods.txt", "chunk_index": 0}),
+        Document(page_content="Keyword search uses lexical overlap.", metadata={"source": "search_methods.txt", "chunk_index": 1}),
+        Document(page_content="Hybrid search combines both approaches.", metadata={"source": "search_methods.txt", "chunk_index": 2}),
+    ]
+
+    expanded = expand_with_context([(chunks[2], 0.8)], chunks)
+
+    assert len(expanded) == 1
+    assert expanded[0][0].page_content == "Semantic search uses vector similarity. Keyword search uses lexical overlap. Hybrid search combines both approaches."
+    assert expanded[0][1] == 0.8
+
+
+def test_expand_with_context_leaves_self_contained_chunks_alone() -> None:
+    chunks = [
+        Document(page_content="Semantic search uses vector similarity.", metadata={"source": "search_methods.txt", "chunk_index": 0}),
+        Document(page_content="Keyword search uses lexical overlap.", metadata={"source": "search_methods.txt", "chunk_index": 1}),
+    ]
+
+    expanded = expand_with_context([(chunks[1], 0.7)], chunks)
+
+    assert [doc.page_content for doc, _ in expanded] == ["Keyword search uses lexical overlap."]
+
+
+def test_index_uploaded_document_replaces_existing_chunks_of_same_file(tmp_path: Path) -> None:
+    source_file = tmp_path / "upload.txt"
+    source_file.write_text("The leave policy allows paid vacation days.", encoding="utf-8")
+    documents_dir = tmp_path / "documents"
+
+    class StubVectorStore:
+        def __init__(self) -> None:
+            self.rows = {"upload.txt::0": Document(page_content="old text", metadata={"source": "upload.txt"})}
+
+        def get(self, include: list[str] | None = None, where: dict | None = None) -> dict:
+            rows = {k: v for k, v in self.rows.items() if not where or v.metadata.get("source") == where["source"]}
+            return {"ids": list(rows), "documents": [d.page_content for d in rows.values()], "metadatas": [d.metadata for d in rows.values()]}
+
+        def delete(self, ids: list[str]) -> None:
+            for key in ids:
+                self.rows.pop(key, None)
+
+        def add_documents(self, documents: list[Document], ids: list[str]) -> None:
+            self.rows.update(dict(zip(ids, documents)))
+
+    store = StubVectorStore()
+    index_uploaded_document(source_file, store, documents_dir)
+    index_uploaded_document(source_file, store, documents_dir)
+
+    assert [d.page_content for d in store.rows.values()] == ["The leave policy allows paid vacation days."]

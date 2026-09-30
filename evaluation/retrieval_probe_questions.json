@@ -1,0 +1,16 @@
+[
+  {"id": "probe_01", "type": "direct", "question": "What is BM25?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["bm25"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_02", "type": "direct", "question": "What is TF-IDF used for?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["keyword"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_03", "type": "direct", "question": "What is ChromaDB?", "expected_source": "embeddings_and_chroma.txt", "expected_answer_keywords": ["vector database"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_04", "type": "direct", "question": "Why is RAG useful?", "expected_source": "rag_basics.txt", "expected_answer_keywords": ["domain-specific"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_05", "type": "direct", "question": "How much notice do I need to give before a vacation?", "expected_source": "upload_test.txt", "expected_answer_keywords": ["two weeks"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_06", "type": "direct", "question": "Can staff take paid time off?", "expected_source": "upload_test.txt", "expected_answer_keywords": ["paid vacation"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_07", "type": "direct", "question": "What does the system pass to the model?", "expected_source": "rag_basics.txt", "expected_answer_keywords": ["context"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_08", "type": "direct", "question": "Which search method matches exact words?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["keyword"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_09", "type": "direct", "question": "How are search results merged and re-ranked?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["hybrid"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_10", "type": "direct", "question": "Where are embeddings stored?", "expected_source": "embeddings_and_chroma.txt", "expected_answer_keywords": ["chromadb"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_11", "type": "direct", "question": "What is BM25 in Elasticsearch?", "expected_source": "search_methods.txt", "expected_answer_keywords": ["bm25"], "expected_behavior": "answer_from_documents"},
+  {"id": "probe_12", "type": "no_relevant_information", "question": "What is Ollama?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "probe_13", "type": "no_relevant_information", "question": "What is the sick leave policy?", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"},
+  {"id": "probe_14", "type": "no_relevant_information", "question": "Explain the Python programming language.", "expected_source": null, "expected_answer_keywords": [], "expected_behavior": "should_not_answer_from_documents"}
+]

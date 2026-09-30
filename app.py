@@ -10,7 +10,7 @@ from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
-from hybrid_search import deduplicate_results, hybrid_search, normalize_semantic_results
+from hybrid_search import deduplicate_results, expand_with_context, hybrid_search, normalize_semantic_results
 from ingest import index_uploaded_document
 from keyword_search import keyword_search
 from utils import (
@@ -360,6 +360,9 @@ def retrieve_context(
         top_k=top_k,
         keyword_results=keyword_results,
     )
+    # Chunks are sentence-sized; pull in the preceding chunk(s) when a selected
+    # chunk refers back to them ("both approaches", "these vectors").
+    hybrid_results = expand_with_context(hybrid_results, all_chunks)
 
     return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], hybrid_results[:top_k]
 
