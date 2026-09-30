@@ -21,11 +21,11 @@ Query Rewriting -> Hybrid Retrieval -> LLM Answering
 ## Features
 
 - Reads PDF and TXT files from the documents folder
-- Splits documents into chunks using RecursiveCharacterTextSplitter
+- Splits documents into sentence-aligned chunks (one idea per chunk), keeping back-references like "These vectors ..." with their sentence
 - Generates embeddings with sentence-transformers/all-MiniLM-L6-v2
 - Persists embeddings in Chroma
 - Rewrites user questions before retrieval
-- Performs semantic, keyword, and hybrid retrieval
+- Performs semantic, BM25 keyword, and hybrid retrieval with a relevance gate and back-reference context expansion
 - Displays source attribution for every answer
 - Falls back gracefully if Ollama is unavailable
 
@@ -83,6 +83,27 @@ python app.py
 - Explain keyword search.
 - What is hybrid search?
 - What is query rewriting?
+
+## Chunking and Retrieval
+
+**Chunking (`ingest.py`).** Text is cleaned (byte-order marks and layout whitespace removed) and split into sentences. Each sentence is one chunk, except that a sentence opening with a back-reference ("These vectors ...", "However ...") stays with the sentence it depends on, and fragments under 40 characters are merged forward. Sentences over 400 characters fall back to the recursive splitter. Every chunk records `chunk_index`, its position in the source file, and gets a stable id (`<source>::<chunk_index>`), so uploading the same file again replaces its chunks instead of duplicating them.
+
+**Keyword search (`keyword_search.py`).** Okapi BM25 over content words: stop words and question scaffolding ("explain", "tell me about") are removed and a light suffix stemmer lets "stored"/"stores" and "embeddings"/"embedding" match. Adjacent query word pairs found in a chunk get a small bonus.
+
+**Hybrid gate (`hybrid_search.py`).** A chunk is kept only if it is
+
+1. semantically relevant: cosine similarity at least 0.5 and within 0.1 of the best match, or
+2. a keyword rescue, used only when no chunk is a confident semantic match: it contains a rare exact query term (for example "BM25") or every content word of the question. Other chunks of the rescued document that are about as close semantically are kept too.
+
+Kept chunks are ranked by `0.65 * semantic + 0.35 * normalised BM25`.
+
+**Context expansion.** Small chunks can be incomplete: "Hybrid search combines both approaches ..." means nothing without the two sentences before it. When a selected chunk refers back ("both", "these", "the former"), the preceding chunk(s) of the same file are added, and adjacent chunks are merged into one passage in document order.
+
+After changing chunking, rebuild the index with `python ingest.py`.
+
+### Retrieval evaluation
+
+`python evaluation/evaluate_retrieval.py [--details]` scores retrieval without calling Ollama. It measures hit rate, MRR, precision (share of retrieved passages from the expected source), noisy cases, whether the expected answer keywords are in the retrieved text, and rejection of unsupported questions. It runs the main evaluation cases plus `evaluation/retrieval_probe_questions.json` (paraphrases and exact-term questions). See `RETRIEVAL_EVALUATION.md` for the before/after comparison.
 
 ## Query Classification
 

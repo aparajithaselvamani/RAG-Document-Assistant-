@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import List, Tuple
@@ -13,6 +14,18 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from utils import DOCUMENTS_DIR, EMBEDDING_MODEL, VECTOR_DB_PATH, build_chunk_metadata, ensure_documents_exists
 
 SUPPORTED_UPLOAD_SUFFIXES = {".pdf", ".txt"}
+
+# Chunking parameters (characters). Units are normally single sentences.
+MAX_CHUNK_CHARS = 400
+MIN_CHUNK_CHARS = 40
+# Sentence end followed by whitespace and a capital/digit/quote; avoids splitting "e.g. bm25".
+SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+(?=[\"'(\[]?[A-Z0-9])")
+# A sentence opening with one of these depends on the previous sentence for meaning.
+LEADING_REFERENCE_RE = re.compile(
+    r"^(?:these|this|those|that|it|its|they|their|such|both|however|also|additionally|"
+    r"furthermore|moreover|therefore|thus|as a result|in addition)\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _load_document_from_path(file_path: Path) -> List[Document]:
@@ -61,17 +74,75 @@ def load_documents(documents_dir: Path) -> List[Document]:
     return documents
 
 
-def split_documents(documents: List[Document], start_index: int = 0) -> List[Document]:
-    """Split documents into smaller chunks for retrieval."""
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
-    chunks = splitter.split_documents(documents)
-    for index, chunk in enumerate(chunks):
-        metadata = dict(chunk.metadata or {})
-        page_number = metadata.get("page_number") or metadata.get("page")
-        chunk.metadata.update(
-            build_chunk_metadata(start_index + index, metadata.get("source", "unknown"), page_number)
-        )
+def clean_text(text: str) -> str:
+    """Remove byte-order marks and collapse layout whitespace before chunking."""
+    text = (text or "").replace("\ufeff", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def split_into_sentences(text: str) -> List[str]:
+    """Split cleaned text into sentences without breaking abbreviations like 'e.g.'."""
+    sentences = [sentence.strip() for sentence in SENTENCE_BOUNDARY_RE.split(text) if sentence.strip()]
+    return sentences
+
+
+def chunk_text(text: str) -> List[str]:
+    """Create sentence-aligned retrieval units.
+
+    The old 500-character splitter turned every document into one chunk, so a
+    question about one concept retrieved every other concept in the same file.
+    Each unit is now one sentence (so it is about one idea), except that a
+    sentence which opens with a back-reference ("These vectors ...") is kept
+    with the sentence it refers to, and tiny fragments are merged forward.
+    Sentences longer than MAX_CHUNK_CHARS fall back to the recursive splitter.
+    """
+    cleaned = clean_text(text)
+    if not cleaned:
+        return []
+
+    units: List[str] = []
+    for sentence in split_into_sentences(cleaned):
+        if (
+            units
+            and (LEADING_REFERENCE_RE.match(sentence) or len(units[-1]) < MIN_CHUNK_CHARS)
+            and len(units[-1]) + 1 + len(sentence) <= MAX_CHUNK_CHARS
+        ):
+            units[-1] = f"{units[-1]} {sentence}"
+        else:
+            units.append(sentence)
+
+    fallback = RecursiveCharacterTextSplitter(chunk_size=MAX_CHUNK_CHARS, chunk_overlap=MAX_CHUNK_CHARS // 5)
+    chunks: List[str] = []
+    for unit in units:
+        chunks.extend(fallback.split_text(unit) if len(unit) > MAX_CHUNK_CHARS else [unit])
     return chunks
+
+
+def split_documents(documents: List[Document], start_index: int = 0) -> List[Document]:
+    """Split documents into sentence-aligned chunks with position metadata.
+
+    ``chunk_index`` records the chunk's position inside its source document so
+    retrieval can pull in the neighbouring chunk when a chunk refers back to it.
+    """
+    chunks: List[Document] = []
+    position_in_source: dict[str, int] = {}
+    for document in documents:
+        metadata = dict(document.metadata or {})
+        source = metadata.get("source", "unknown")
+        page_number = metadata.get("page_number") if metadata.get("page_number") is not None else metadata.get("page")
+        for text in chunk_text(document.page_content):
+            chunk_index = position_in_source.get(source, 0)
+            position_in_source[source] = chunk_index + 1
+            chunk_metadata = {key: value for key, value in metadata.items() if isinstance(value, (str, int, float, bool))}
+            chunk_metadata.update(build_chunk_metadata(start_index + len(chunks), source, page_number))
+            chunk_metadata["chunk_index"] = chunk_index
+            chunks.append(Document(page_content=text, metadata=chunk_metadata))
+    return chunks
+
+
+def chunk_ids(chunks: List[Document]) -> List[str]:
+    """Stable ids (source + position) so re-indexing a file replaces instead of duplicating it."""
+    return [f"{chunk.metadata.get('source', 'unknown')}::{chunk.metadata.get('chunk_index', index)}" for index, chunk in enumerate(chunks)]
 
 
 def build_vector_database(chunks: List[Document], persist_dir: Path) -> None:
@@ -87,6 +158,7 @@ def build_vector_database(chunks: List[Document], persist_dir: Path) -> None:
     Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
+        ids=chunk_ids(chunks),
         persist_directory=str(persist_dir),
     )
 
@@ -123,14 +195,31 @@ def index_uploaded_document(
     copied_path = copy_uploaded_document(validated_path, documents_dir)
 
     documents = _load_document_from_path(copied_path)
+    # Re-uploading a file must replace its old chunks; appending left the
+    # same text indexed twice, which wasted top-k slots with duplicates.
+    remove_source_chunks(vector_store, copied_path.name)
     existing_chunks = get_all_chunks(vector_store)
     chunks = split_documents(documents, start_index=len(existing_chunks))
 
-    vector_store.add_documents(chunks)
+    try:
+        vector_store.add_documents(chunks, ids=chunk_ids(chunks))
+    except TypeError:
+        vector_store.add_documents(chunks)
     if hasattr(vector_store, "persist"):
         vector_store.persist()
 
     return len(chunks), len(chunks)
+
+
+def remove_source_chunks(vector_store: Chroma, source_name: str) -> None:
+    """Delete previously indexed chunks of one source file, if the store supports it."""
+    try:
+        existing = vector_store.get(where={"source": source_name})
+        stale_ids = existing.get("ids", []) if existing else []
+        if stale_ids:
+            vector_store.delete(ids=stale_ids)
+    except Exception:
+        pass
 
 
 def get_all_chunks(vector_store: Chroma) -> List[Document]:
