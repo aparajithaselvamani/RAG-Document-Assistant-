@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 vector_db/
 *.log
+models/

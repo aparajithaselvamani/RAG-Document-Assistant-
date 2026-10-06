@@ -1,0 +1,230 @@
+{
+  "_about": "Chunk-level relevance labels for evaluate_reranking.py. grade 2 = the chunk answers the question; grade 1 = useful supporting context; unlisted chunks = 0 (not relevant). A chunk matches when its source equals 'source' and its text starts with 'starts_with'. Cases not listed (no-information questions) should retrieve nothing.",
+  "labels": {
+    "direct_01": [
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "Retrieval-Augmented Generation, or RAG",
+        "grade": 2
+      },
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "The system retrieves",
+        "grade": 1
+      },
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "RAG is useful when",
+        "grade": 1
+      }
+    ],
+    "direct_02": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Semantic search uses",
+        "grade": 2
+      }
+    ],
+    "direct_03": [
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "Embeddings convert text",
+        "grade": 2
+      },
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "ChromaDB is a vector database",
+        "grade": 1
+      }
+    ],
+    "direct_04": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Hybrid search combines",
+        "grade": 2
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Semantic search uses",
+        "grade": 1
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 1
+      }
+    ],
+    "direct_05": [
+      {
+        "source": "query_rewriting_and_ollama.pdf",
+        "starts_with": "Query rewriting improves",
+        "grade": 2
+      }
+    ],
+    "direct_06": [
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The leave policy allows",
+        "grade": 2
+      },
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The handbook explains",
+        "grade": 1
+      }
+    ],
+    "followup_01": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Semantic search uses",
+        "grade": 2
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 2
+      }
+    ],
+    "followup_02": [
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "ChromaDB is a vector database",
+        "grade": 2
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Semantic search uses",
+        "grade": 2
+      },
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "Embeddings convert text",
+        "grade": 1
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 1
+      }
+    ],
+    "followup_03": [
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The handbook explains",
+        "grade": 2
+      },
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The leave policy allows",
+        "grade": 1
+      }
+    ],
+    "probe_01": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 2
+      }
+    ],
+    "probe_02": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 2
+      }
+    ],
+    "probe_03": [
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "ChromaDB is a vector database",
+        "grade": 2
+      }
+    ],
+    "probe_04": [
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "RAG is useful when",
+        "grade": 2
+      },
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "Retrieval-Augmented Generation, or RAG",
+        "grade": 1
+      }
+    ],
+    "probe_05": [
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The handbook explains",
+        "grade": 2
+      },
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The leave policy allows",
+        "grade": 1
+      }
+    ],
+    "probe_06": [
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The leave policy allows",
+        "grade": 2
+      },
+      {
+        "source": "upload_test.txt",
+        "starts_with": "The handbook explains",
+        "grade": 1
+      }
+    ],
+    "probe_07": [
+      {
+        "source": "rag_basics.txt",
+        "starts_with": "The system retrieves",
+        "grade": 2
+      }
+    ],
+    "probe_08": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 2
+      }
+    ],
+    "probe_09": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Hybrid search combines",
+        "grade": 2
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Semantic search uses",
+        "grade": 1
+      },
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 1
+      }
+    ],
+    "probe_10": [
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "ChromaDB is a vector database",
+        "grade": 2
+      },
+      {
+        "source": "embeddings_and_chroma.txt",
+        "starts_with": "Embeddings convert text",
+        "grade": 1
+      }
+    ],
+    "probe_11": [
+      {
+        "source": "search_methods.txt",
+        "starts_with": "Keyword search uses",
+        "grade": 2
+      }
+    ]
+  }
+}
