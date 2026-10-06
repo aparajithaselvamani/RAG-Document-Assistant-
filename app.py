@@ -12,6 +12,8 @@ from langchain_core.documents import Document
 
 from hybrid_search import deduplicate_results, expand_with_context, hybrid_search, normalize_semantic_results
 from ingest import index_uploaded_document
+import reranker as reranker_module
+from reranker import get_reranker
 from keyword_search import keyword_search
 from utils import (
     DEFAULT_MODEL,
@@ -337,34 +339,60 @@ User question:
     return cleaned_question
 
 
+def rank_chunks(
+    vector_store: Chroma,
+    question: str,
+    top_k: int = DEFAULT_TOP_K,
+    conversation_history: Deque[Tuple[str, str]] | None = None,
+    rerank: bool | None = None,
+) -> Tuple[str, List[Tuple[Document, float]], List[Tuple[Document, float]], List[Tuple[Document, float]], List[Document]]:
+    """Retrieve and rank individual chunks (before context expansion).
+
+    Stage 1: semantic + BM25 hybrid search with the relevance gate.  When
+    reranking is on, stage 1 hands up to RERANK_CANDIDATES chunks to the
+    cross-encoder (stage 2), which reorders them and keeps the best ``top_k``.
+    ``rerank=None`` uses the module default (reranker.ENABLE_RERANKING).
+    """
+    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
+    resolved_question = resolve_follow_up_question(question, history)
+    rewritten_query = rewrite_query(resolved_question)
+
+    reranker = None if rerank is False else get_reranker(force=bool(rerank))
+    candidate_count = max(top_k, reranker_module.RERANK_CANDIDATES) if reranker else top_k
+
+    semantic_distances = vector_store.similarity_search_with_score(rewritten_query, k=max(top_k * 2, candidate_count))
+    all_chunks = get_all_chunks(vector_store)
+    keyword_results = keyword_search(rewritten_query, all_chunks, top_k=max(top_k * 2, candidate_count))
+    semantic_results = normalize_semantic_results(semantic_distances)
+    keyword_results = deduplicate_results(keyword_results)
+    ranked = hybrid_search(
+        rewritten_query,
+        all_chunks,
+        semantic_distances,
+        top_k=candidate_count,
+        keyword_results=keyword_results,
+    )
+    if reranker:
+        ranked = reranker.rerank(rewritten_query, ranked, top_k=top_k)
+    return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], ranked[:top_k], all_chunks
+
+
 def retrieve_context(
     vector_store: Chroma,
     question: str,
     top_k: int = DEFAULT_TOP_K,
     conversation_history: Deque[Tuple[str, str]] | None = None,
+    rerank: bool | None = None,
 ) -> Tuple[str, List[Tuple[Document, float]], List[Tuple[Document, float]], List[Tuple[Document, float]]]:
-    """Retrieve semantic, keyword, and hybrid results using conversation-aware question resolution."""
-    history = conversation_history or deque(maxlen=MAX_CONVERSATION_TURNS)
-    resolved_question = resolve_follow_up_question(question, history)
-    rewritten_query = rewrite_query(resolved_question)
-
-    semantic_distances = vector_store.similarity_search_with_score(rewritten_query, k=top_k * 2)
-    all_chunks = get_all_chunks(vector_store)
-    keyword_results = keyword_search(rewritten_query, all_chunks, top_k=top_k * 2)
-    semantic_results = normalize_semantic_results(semantic_distances)
-    keyword_results = deduplicate_results(keyword_results)
-    hybrid_results = hybrid_search(
-        rewritten_query,
-        all_chunks,
-        semantic_distances,
-        top_k=top_k,
-        keyword_results=keyword_results,
+    """Retrieve semantic, keyword, and final (hybrid -> reranked -> expanded) results."""
+    rewritten_query, semantic_results, keyword_results, ranked, all_chunks = rank_chunks(
+        vector_store, question, top_k=top_k, conversation_history=conversation_history, rerank=rerank
     )
     # Chunks are sentence-sized; pull in the preceding chunk(s) when a selected
     # chunk refers back to them ("both approaches", "these vectors").
-    hybrid_results = expand_with_context(hybrid_results, all_chunks)
+    final_results = expand_with_context(ranked, all_chunks)
 
-    return rewritten_query, semantic_results[:top_k], keyword_results[:top_k], hybrid_results[:top_k]
+    return rewritten_query, semantic_results, keyword_results, final_results[:top_k]
 
 
 def generate_answer(
@@ -585,9 +613,9 @@ def main() -> None:
             display_search_results("Document", keyword_results, score_label="Score")
 
             print("\n----------------------------------")
-            print("Hybrid Ranking")
+            print("Final Ranking (hybrid search + reranking)")
             print("----------------------------------")
-            display_search_results("Document", hybrid_results, score_label="Combined Score")
+            display_search_results("Document", hybrid_results, score_label="Relevance")
 
             print("\n----------------------------------")
             print("Answer")

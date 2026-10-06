@@ -26,6 +26,7 @@ Query Rewriting -> Hybrid Retrieval -> LLM Answering
 - Persists embeddings in Chroma
 - Rewrites user questions before retrieval
 - Performs semantic, BM25 keyword, and hybrid retrieval with a relevance gate and back-reference context expansion
+- Reranks retrieved chunks with a cross-encoder (ms-marco-MiniLM-L-6-v2) before answering
 - Displays source attribution for every answer
 - Falls back gracefully if Ollama is unavailable
 
@@ -104,6 +105,20 @@ After changing chunking, rebuild the index with `python ingest.py`.
 ### Retrieval evaluation
 
 `python evaluation/evaluate_retrieval.py [--details]` scores retrieval without calling Ollama. It measures hit rate, MRR, precision (share of retrieved passages from the expected source), noisy cases, whether the expected answer keywords are in the retrieved text, and rejection of unsupported questions. It runs the main evaluation cases plus `evaluation/retrieval_probe_questions.json` (paraphrases and exact-term questions). See `RETRIEVAL_EVALUATION.md` for the before/after comparison.
+
+### Reranking
+
+After hybrid search, a cross-encoder (`reranker.py`, model `cross-encoder/ms-marco-MiniLM-L-6-v2`) reads the question together with each candidate chunk and scores how well the chunk answers it. Hybrid search hands over up to 8 candidates. The reranker reorders them, drops any scoring below -6 (a logit; around -11 means unrelated), and keeps the top 4. Context expansion then runs on the reranked list.
+
+The model (about 90 MB) is downloaded on first use. To keep a local copy in the project, run:
+
+```bash
+python -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2').save('models/ms-marco-MiniLM-L-6-v2')"
+```
+
+`models/` is git-ignored. If the model cannot be loaded, the app prints a notice and uses the hybrid ranking alone. Set `ENABLE_RERANKING = False` in `reranker.py` to turn reranking off.
+
+`python evaluation/evaluate_reranking.py [--details]` compares retrieval with and without reranking using the chunk-level labels in `evaluation/rerank_relevance_labels.json`. See `RERANKING_EVALUATION.md` for the results.
 
 ## Query Classification
 

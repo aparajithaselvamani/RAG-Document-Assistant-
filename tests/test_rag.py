@@ -637,3 +637,115 @@ def test_index_uploaded_document_replaces_existing_chunks_of_same_file(tmp_path:
     index_uploaded_document(source_file, store, documents_dir)
 
     assert [d.page_content for d in store.rows.values()] == ["The leave policy allows paid vacation days."]
+
+
+# ---------------------------------------------------------------------------
+# Cross-encoder reranking (second retrieval stage).  A fake model stands in for
+# ms-marco-MiniLM so these tests run without downloading anything.
+# ---------------------------------------------------------------------------
+import reranker as reranker_module  # noqa: E402
+from reranker import CrossEncoderReranker  # noqa: E402
+
+
+class FakeCrossEncoder:
+    """Scores a pair by a lookup on the chunk text; unknown chunks are clearly irrelevant."""
+
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+        self.calls = 0
+
+    def predict(self, pairs, show_progress_bar: bool = False):
+        self.calls += 1
+        return [self.scores.get(text, -11.0) for _query, text in pairs]
+
+
+def _doc(text: str, source: str = "search_methods.txt", index: int = 0) -> Document:
+    return Document(page_content=text, metadata={"source": source, "chunk_index": index})
+
+
+def test_reranker_reorders_by_cross_encoder_score_and_records_scores() -> None:
+    semantic = _doc("Semantic search uses vector similarity.", index=0)
+    keyword = _doc("Keyword search uses BM25.", index=1)
+    model = FakeCrossEncoder({semantic.page_content: 1.0, keyword.page_content: 6.0})
+
+    results = CrossEncoderReranker(model).rerank("What is BM25?", [(semantic, 0.9), (keyword, 0.6)])
+
+    assert [doc.page_content for doc, _ in results] == [keyword.page_content, semantic.page_content]
+    assert results[0][0].metadata["rerank_score"] == 6.0
+    assert results[0][0].metadata["first_stage_score"] == 0.6
+    assert 0.99 < results[0][1] <= 1.0  # sigmoid of the logit
+
+
+def test_reranker_drops_candidates_below_minimum_score() -> None:
+    relevant = _doc("RAG retrieves documents.", source="rag_basics.txt")
+    unrelated = _doc("Retrieval-Augmented Generation helps language models.", source="rag_basics.txt", index=1)
+    model = FakeCrossEncoder({relevant.page_content: 3.0, unrelated.page_content: -10.7})
+
+    results = CrossEncoderReranker(model, min_score=-6.0).rerank("Explain Python.", [(unrelated, 0.6), (relevant, 0.5)])
+
+    assert [doc.page_content for doc, _ in results] == [relevant.page_content]
+
+
+def test_reranker_keeps_only_top_k_and_handles_empty_input() -> None:
+    docs = [_doc(f"chunk {i}", index=i) for i in range(5)]
+    model = FakeCrossEncoder({doc.page_content: float(i) for i, doc in enumerate(docs)})
+    reranker = CrossEncoderReranker(model)
+
+    results = reranker.rerank("q", [(doc, 0.5) for doc in docs], top_k=2)
+
+    assert [doc.page_content for doc, _ in results] == ["chunk 4", "chunk 3"]
+    assert reranker.rerank("q", []) == []
+
+
+def test_get_reranker_falls_back_to_none_when_model_cannot_load(monkeypatch: object) -> None:
+    import sentence_transformers
+
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no network")
+
+    monkeypatch.setattr(reranker_module, "_reranker", None)
+    monkeypatch.setattr(reranker_module, "_load_failed", False)
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", broken)
+
+    assert reranker_module.get_reranker(force=True) is None
+    assert reranker_module.get_reranker(force=True) is None  # does not retry every query
+
+
+def test_get_reranker_respects_disable_switch(monkeypatch: object) -> None:
+    monkeypatch.setattr(reranker_module, "ENABLE_RERANKING", False)
+    monkeypatch.setattr(reranker_module, "_load_failed", False)
+    sentinel = CrossEncoderReranker(FakeCrossEncoder({}))
+    monkeypatch.setattr(reranker_module, "_reranker", sentinel)
+
+    assert reranker_module.get_reranker() is None
+    assert reranker_module.get_reranker(force=True) is sentinel
+
+
+def test_retrieve_context_reranks_a_wider_candidate_pool(monkeypatch: object) -> None:
+    chunks = [
+        _doc("Semantic search uses vector similarity to find related passages.", index=0),
+        _doc("Keyword search uses term statistics such as BM25.", index=1),
+        _doc("The leave policy allows paid vacation days.", source="upload_test.txt", index=0),
+    ]
+
+    class StubStore:
+        def similarity_search_with_score(self, query: str, k: int):
+            self.k = k
+            return [(chunks[0], 0.6), (chunks[1], 0.7), (chunks[2], 1.6)]
+
+        def get(self, include=None):
+            return {"documents": [c.page_content for c in chunks], "metadatas": [c.metadata for c in chunks]}
+
+    # The cross-encoder prefers the semantic chunk; the first stage prefers the BM25 chunk.
+    model = FakeCrossEncoder({chunks[0].page_content: 7.0, chunks[1].page_content: 1.0})
+    monkeypatch.setattr(app, "get_reranker", lambda force=False: CrossEncoderReranker(model))
+    store = StubStore()
+
+    _, _, _, plain = app.retrieve_context(store, "Which search method uses BM25?", top_k=1, rerank=False)
+    plain_pool = store.k
+    _, _, _, reranked = app.retrieve_context(store, "Which search method uses BM25?", top_k=1, rerank=True)
+
+    assert model.calls == 1
+    assert store.k >= reranker_module.RERANK_CANDIDATES > plain_pool
+    assert [doc.page_content for doc, _ in plain] == [chunks[1].page_content]
+    assert [doc.page_content for doc, _ in reranked] == [chunks[0].page_content]
