@@ -100,6 +100,16 @@ Kept chunks are ranked by `0.65 * semantic + 0.35 * normalised BM25`.
 
 **Context expansion.** Small chunks can be incomplete: "Hybrid search combines both approaches ..." means nothing without the two sentences before it. When a selected chunk refers back ("both", "these", "the former"), the preceding chunk(s) of the same file are added, and adjacent chunks are merged into one passage in document order.
 
+### Faithfulness verification
+
+After generating an answer, the assistant compares each answer sentence with the sentences in the final retrieved context using cosine similarity from the same `sentence-transformers/all-MiniLM-L6-v2` embeddings instance used by Chroma retrieval. Similarity of `0.75` or higher is classified as supported; `0.45` to below `0.75` is weakly supported; lower scores are unsupported. These thresholds were checked against close grounded paraphrases (approximately `0.93`), a compressed grounded paraphrase (`0.58`), and unrelated claims (approximately `0.00`) using project document text.
+
+The resulting `SUPPORTED`, `PARTIALLY_SUPPORTED`, or `UNSUPPORTED` verdict is diagnostic only. It is displayed with the answer and does not block, rewrite, or otherwise change the answer. Run the faithfulness evaluation with:
+
+```bash
+python evaluation/evaluate_faithfulness.py
+```
+
 After changing chunking, rebuild the index with `python ingest.py`.
 
 ### Retrieval evaluation
