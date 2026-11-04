@@ -22,6 +22,7 @@ from ingest import copy_uploaded_document, index_uploaded_document, validate_upl
 from keyword_search import keyword_search
 from utils import create_sample_documents
 from evaluation import evaluate_rag
+from faithfulness import check_faithfulness
 
 
 def test_keyword_search_prefers_relevant_chunks() -> None:
@@ -719,6 +720,44 @@ def test_get_reranker_respects_disable_switch(monkeypatch: object) -> None:
 
     assert reranker_module.get_reranker() is None
     assert reranker_module.get_reranker(force=True) is sentinel
+
+
+class FakeFaithfulnessEmbeddings:
+    """Deterministic embeddings for testing verdict aggregation without model loading."""
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        grounded = [1.0, 0.0, 0.0]
+        unrelated = [0.0, 1.0, 0.0]
+        return [
+            unrelated if "Eiffel Tower" in text or "qubits" in text else grounded
+            for text in texts
+        ]
+
+
+def test_faithfulness_marks_document_supported_answer() -> None:
+    context = "Semantic search uses vector similarity to find conceptually related passages."
+    result = check_faithfulness(context, [context], FakeFaithfulnessEmbeddings())
+
+    assert result.verdict == "SUPPORTED"
+    assert len(result.sentences) == 1
+    assert result.sentences[0].verdict == "SUPPORTED"
+
+
+def test_faithfulness_marks_mixed_grounded_and_unrelated_answer_partial() -> None:
+    grounded = "Semantic search uses vector similarity to find conceptually related passages."
+    answer = grounded + " The Eiffel Tower is in Paris."
+    result = check_faithfulness(answer, [grounded], FakeFaithfulnessEmbeddings())
+
+    assert result.verdict == "PARTIALLY_SUPPORTED"
+    assert [sentence.verdict for sentence in result.sentences] == ["SUPPORTED", "UNSUPPORTED"]
+
+
+def test_faithfulness_marks_unrelated_answer_unsupported() -> None:
+    context = "Keyword search uses lexical overlap and term statistics such as TF-IDF or BM25."
+    result = check_faithfulness("Quantum computers use qubits to perform computation.", [context], FakeFaithfulnessEmbeddings())
+
+    assert result.verdict == "UNSUPPORTED"
+    assert result.sentences[0].verdict == "UNSUPPORTED"
 
 
 def test_retrieve_context_reranks_a_wider_candidate_pool(monkeypatch: object) -> None:

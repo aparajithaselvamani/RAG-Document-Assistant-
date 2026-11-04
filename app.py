@@ -11,6 +11,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
 
 from hybrid_search import deduplicate_results, expand_with_context, hybrid_search, normalize_semantic_results
+from faithfulness import check_faithfulness
 from ingest import index_uploaded_document
 import reranker as reranker_module
 from reranker import get_reranker
@@ -625,7 +626,16 @@ def main() -> None:
             # irrelevant source attribution.
             answer_chunks = [chunk for chunk, _ in hybrid_results]
             answer = generate_answer(question, answer_chunks, conversation_history=conversation_history)
+            try:
+                faithfulness_verdict = check_faithfulness(
+                    answer,
+                    [chunk.page_content for chunk in answer_chunks],
+                    vector_store.embeddings,
+                ).verdict
+            except Exception as exc:
+                faithfulness_verdict = f"UNAVAILABLE ({exc})"
             update_conversation_history(conversation_history, question, answer)
+            print(f"\nFaithfulness: {faithfulness_verdict}")
             print(answer)
             display_sources(answer_chunks)
         elif choice == "2":
