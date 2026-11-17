@@ -12,7 +12,7 @@ from langchain_core.documents import Document
 
 from hybrid_search import deduplicate_results, expand_with_context, hybrid_search, normalize_semantic_results
 from faithfulness import check_faithfulness
-from ingest import index_uploaded_document
+from ingest import DocumentOperationResult, add_document, delete_document, update_document
 import reranker as reranker_module
 from reranker import get_reranker
 from keyword_search import keyword_search
@@ -492,20 +492,42 @@ def display_menu() -> None:
     print("RAG Document Assistant")
     print("----------------------------------")
     print("1. Ask questions")
-    print("2. Upload a document")
-    print("3. Exit")
+    print("2. Add a document")
+    print("3. Update a document")
+    print("4. Delete a document")
+    print("5. Exit")
+
+
+def _prompt_for_document_path() -> str:
+    print("\nEnter file path:")
+    return input().strip()
+
+
+def _report_index_result(result: DocumentOperationResult, action: str) -> None:
+    if result.status == "duplicate":
+        print("\n----------------------------------")
+        print("Duplicate Document")
+        print("----------------------------------")
+        print(f"Already indexed as: {result.duplicate_source}")
+        return
+
+    heading = "Document Updated" if result.status == "updated" else f"{action} Successful"
+    print(f"\n----------------------------------\n{heading}\n----------------------------------")
+    print(f"Filename: {result.source_name}")
+    print(f"Chunks Created: {result.chunks_created}")
+    print(f"Embeddings Generated: {result.embeddings_generated}")
+    print("Vector Database Updated Successfully.")
 
 
 def handle_upload(vector_store: Chroma) -> None:
-    """Prompt for a file path, validate it, copy it into the documents folder, and index it."""
-    print("\nEnter file path:")
-    file_path = input().strip()
+    """Prompt for a file and add it, updating a same-named source if needed."""
+    file_path = _prompt_for_document_path()
     if not file_path:
         print("No file path provided.")
         return
 
     try:
-        chunks_created, embeddings_generated = index_uploaded_document(file_path, vector_store)
+        result = add_document(file_path, vector_store)
     except FileNotFoundError as exc:
         print(f"Error: {exc}")
         return
@@ -516,13 +538,49 @@ def handle_upload(vector_store: Chroma) -> None:
         print(f"Error indexing uploaded document: {exc}")
         return
 
-    print("\n----------------------------------")
-    print("Upload Successful")
-    print("----------------------------------")
-    print(f"Filename: {Path(file_path).name}")
-    print(f"Chunks Created: {chunks_created}")
-    print(f"Embeddings Generated: {embeddings_generated}")
-    print("Vector Database Updated Successfully.")
+    _report_index_result(result, "Add")
+
+
+def handle_update(vector_store: Chroma) -> None:
+    """Prompt for a replacement file with the same name as an indexed source."""
+    file_path = _prompt_for_document_path()
+    if not file_path:
+        print("No file path provided.")
+        return
+
+    try:
+        result = update_document(file_path, vector_store)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}")
+        return
+    except Exception as exc:
+        print(f"Error updating document: {exc}")
+        return
+
+    _report_index_result(result, "Update")
+
+
+def handle_delete(vector_store: Chroma) -> None:
+    """Prompt for an indexed source filename and remove it from the index."""
+    print("\nEnter document filename to delete:")
+    source_name = input().strip()
+    if not source_name:
+        print("No document filename provided.")
+        return
+
+    try:
+        chunks_removed = delete_document(source_name, vector_store)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+    except Exception as exc:
+        print(f"Error deleting document: {exc}")
+        return
+
+    if chunks_removed:
+        print(f"Deleted {source_name}: {chunks_removed} chunk(s) removed.")
+    else:
+        print(f"No indexed document found for {source_name}; nothing was removed.")
 
 
 def main() -> None:
@@ -641,10 +699,14 @@ def main() -> None:
         elif choice == "2":
             handle_upload(vector_store)
         elif choice == "3":
+            handle_update(vector_store)
+        elif choice == "4":
+            handle_delete(vector_store)
+        elif choice == "5":
             print("Goodbye!")
             break
         else:
-            print("Invalid option. Please choose 1, 2, or 3.")
+            print("Invalid option. Please choose 1, 2, 3, 4, or 5.")
 
 
 if __name__ == "__main__":

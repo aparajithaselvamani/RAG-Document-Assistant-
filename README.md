@@ -68,6 +68,17 @@ python app.py
 - What is query rewriting?
 - What documents are indexed?
 
+## Document Management
+
+The interactive menu can add, update, and delete individual documents. Add and update accept a PDF or TXT file path; deleting asks for the indexed filename (for example, `policy.pdf`).
+
+- **Add:** A new source is chunked and embedded once. Uploading a file with the same name and changed contents replaces that source's chunks.
+- **Duplicate detection:** SHA-256 hashes of file contents are stored in chunk metadata. If identical content is already indexed under any filename, the upload is reported as a duplicate of the existing source and no chunks or embeddings are added.
+- **Update:** Replaces only the named source's chunks and embeddings with the new version.
+- **Delete:** Removes only the named source's chunks from Chroma and removes its stored file. Deleting a source that is not indexed is a no-op.
+
+These operations are incremental: they add or remove chunks for the affected source only and never rebuild or re-embed the other indexed documents. The full `python ingest.py` command remains available for an intentional complete rebuild.
+
 ## Technologies Used
 
 - Python 3.11
