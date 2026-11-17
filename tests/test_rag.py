@@ -18,7 +18,15 @@ from app import (
     update_conversation_history,
 )
 from hybrid_search import hybrid_search, normalize_semantic_results
-from ingest import copy_uploaded_document, index_uploaded_document, validate_uploaded_file
+from ingest import (
+    add_document,
+    copy_uploaded_document,
+    content_hash,
+    delete_document,
+    index_uploaded_document,
+    update_document,
+    validate_uploaded_file,
+)
 from keyword_search import keyword_search
 from utils import create_sample_documents
 from evaluation import evaluate_rag
@@ -623,7 +631,11 @@ def test_index_uploaded_document_replaces_existing_chunks_of_same_file(tmp_path:
             self.rows = {"upload.txt::0": Document(page_content="old text", metadata={"source": "upload.txt"})}
 
         def get(self, include: list[str] | None = None, where: dict | None = None) -> dict:
-            rows = {k: v for k, v in self.rows.items() if not where or v.metadata.get("source") == where["source"]}
+            rows = {
+                key: value
+                for key, value in self.rows.items()
+                if not where or all(value.metadata.get(field) == expected for field, expected in where.items())
+            }
             return {"ids": list(rows), "documents": [d.page_content for d in rows.values()], "metadatas": [d.metadata for d in rows.values()]}
 
         def delete(self, ids: list[str]) -> None:
@@ -638,6 +650,186 @@ def test_index_uploaded_document_replaces_existing_chunks_of_same_file(tmp_path:
     index_uploaded_document(source_file, store, documents_dir)
 
     assert [d.page_content for d in store.rows.values()] == ["The leave policy allows paid vacation days."]
+
+
+class InMemoryVectorStore:
+    """Small vector-store test double that keeps per-ID embedding snapshots."""
+
+    def __init__(self) -> None:
+        self.rows: dict[str, Document] = {}
+        self.embeddings: dict[str, str] = {}
+        self.embedding_calls = 0
+
+    def get(self, include: list[str] | None = None, where: dict | None = None) -> dict:
+        selected = [
+            (chunk_id, document)
+            for chunk_id, document in self.rows.items()
+            if not where or all(document.metadata.get(key) == value for key, value in where.items())
+        ]
+        result = {
+            "ids": [chunk_id for chunk_id, _ in selected],
+            "metadatas": [document.metadata for _, document in selected],
+        }
+        if not include or "documents" in include:
+            result["documents"] = [document.page_content for _, document in selected]
+        return result
+
+    def delete(self, ids: list[str]) -> None:
+        for chunk_id in ids:
+            self.rows.pop(chunk_id, None)
+            self.embeddings.pop(chunk_id, None)
+
+    def add_documents(self, documents: list[Document], ids: list[str]) -> None:
+        for chunk_id, document in zip(ids, documents):
+            self.rows[chunk_id] = document
+            self.embeddings[chunk_id] = f"embedded:{document.page_content}"
+            self.embedding_calls += 1
+
+
+def test_add_document_indexes_chunks_and_content_hash(tmp_path: Path) -> None:
+    source_file = tmp_path / "guide.txt"
+    source_file.write_text(
+        "The first document sentence describes the service and its main purpose. "
+        "The second document sentence explains how users access the service.",
+        encoding="utf-8",
+    )
+    store = InMemoryVectorStore()
+    documents_dir = tmp_path / "documents"
+
+    result = add_document(source_file, store, documents_dir)
+
+    assert result.status == "added"
+    assert result.chunks_created == 2
+    assert len(store.rows) == 2
+    assert all(len(document.metadata["content_hash"]) == 64 for document in store.rows.values())
+
+
+def test_duplicate_document_with_different_filename_is_not_reindexed(tmp_path: Path) -> None:
+    first_file = tmp_path / "original.txt"
+    duplicate_file = tmp_path / "renamed.txt"
+    content = "The same exact content should only be indexed once in the vector database."
+    first_file.write_text(content, encoding="utf-8")
+    duplicate_file.write_text(content, encoding="utf-8")
+    store = InMemoryVectorStore()
+    documents_dir = tmp_path / "documents"
+
+    first_result = add_document(first_file, store, documents_dir)
+    original_rows = dict(store.rows)
+    original_embeddings = dict(store.embeddings)
+    original_embedding_calls = store.embedding_calls
+    duplicate_result = add_document(duplicate_file, store, documents_dir)
+
+    assert first_result.status == "added"
+    assert duplicate_result.status == "duplicate"
+    assert duplicate_result.duplicate_source == "original.txt"
+    assert store.rows == original_rows
+    assert store.embeddings == original_embeddings
+    assert store.embedding_calls == original_embedding_calls
+    assert not (documents_dir / "renamed.txt").exists()
+
+
+def test_duplicate_detection_backfills_hash_for_legacy_indexed_source(tmp_path: Path) -> None:
+    documents_dir = tmp_path / "documents"
+    documents_dir.mkdir()
+    content = "This existing indexed document predates content hash metadata."
+    (documents_dir / "legacy.txt").write_text(content, encoding="utf-8")
+    upload_file = tmp_path / "another-name.txt"
+    upload_file.write_text(content, encoding="utf-8")
+    store = InMemoryVectorStore()
+    store.rows["legacy.txt::0"] = Document(page_content=content, metadata={"source": "legacy.txt"})
+    store.embeddings["legacy.txt::0"] = "original legacy embedding"
+
+    result = add_document(upload_file, store, documents_dir)
+
+    assert result.status == "duplicate"
+    assert result.duplicate_source == "legacy.txt"
+    assert store.embedding_calls == 0
+    assert list(store.rows) == ["legacy.txt::0"]
+
+
+def test_update_replaces_only_the_named_sources_chunks(tmp_path: Path) -> None:
+    source_file = tmp_path / "policy.txt"
+    source_file.write_text(
+        "The old policy grants fourteen annual leave days. "
+        "Employees submit old policy requests through a manager.",
+        encoding="utf-8",
+    )
+    unrelated_file = tmp_path / "unrelated.txt"
+    unrelated_file.write_text("The unrelated record describes the office parking schedule.", encoding="utf-8")
+    store = InMemoryVectorStore()
+    documents_dir = tmp_path / "documents"
+    add_document(unrelated_file, store, documents_dir)
+    add_document(source_file, store, documents_dir)
+    unrelated_ids = {chunk_id for chunk_id, doc in store.rows.items() if doc.metadata["source"] == "unrelated.txt"}
+    unrelated_embeddings = {chunk_id: store.embeddings[chunk_id] for chunk_id in unrelated_ids}
+    old_chunk_count = len([doc for doc in store.rows.values() if doc.metadata["source"] == "policy.txt"])
+
+    source_file.write_text(
+        "The new policy grants twenty annual leave days. "
+        "Employees submit updated requests through the new portal. "
+        "Managers review each request before approval.",
+        encoding="utf-8",
+    )
+    result = update_document(source_file, store, documents_dir)
+    policy_documents = [doc for doc in store.rows.values() if doc.metadata["source"] == "policy.txt"]
+
+    assert result.status == "updated"
+    assert result.chunks_created == 3
+    assert len(policy_documents) == 3
+    assert len(store.rows) == len(unrelated_ids) + 3
+    assert all("old policy" not in doc.page_content.lower() for doc in policy_documents)
+    assert any("twenty annual leave days" in doc.page_content for doc in policy_documents)
+    assert all(doc.metadata["content_hash"] == content_hash(source_file) for doc in policy_documents)
+    assert {chunk_id: store.embeddings[chunk_id] for chunk_id in unrelated_ids} == unrelated_embeddings
+    assert old_chunk_count == 2
+
+
+def test_delete_removes_only_source_chunks_and_missing_source_is_noop(tmp_path: Path) -> None:
+    documents_dir = tmp_path / "documents"
+    store = InMemoryVectorStore()
+    first_file = tmp_path / "remove.txt"
+    first_file.write_text(
+        "This first sentence belongs to the source that should be removed. "
+        "Managers review the source document before it can be removed.",
+        encoding="utf-8",
+    )
+    other_file = tmp_path / "keep.txt"
+    other_file.write_text("This separate document must remain indexed after deletion.", encoding="utf-8")
+    add_document(first_file, store, documents_dir)
+    add_document(other_file, store, documents_dir)
+    other_rows = {
+        chunk_id: document
+        for chunk_id, document in store.rows.items()
+        if document.metadata["source"] == "keep.txt"
+    }
+    other_embeddings = {chunk_id: store.embeddings[chunk_id] for chunk_id in other_rows}
+
+    assert delete_document("remove.txt", store, documents_dir) == 2
+    assert not any(doc.metadata["source"] == "remove.txt" for doc in store.rows.values())
+    assert store.rows == other_rows
+    assert store.embeddings == other_embeddings
+    assert not (documents_dir / "remove.txt").exists()
+    assert delete_document("missing.txt", store, documents_dir) == 0
+
+
+def test_add_update_delete_preserve_unrelated_chunk_ids_and_embeddings(tmp_path: Path) -> None:
+    store = InMemoryVectorStore()
+    documents_dir = tmp_path / "documents"
+    stable_file = tmp_path / "stable.txt"
+    stable_file.write_text("This stable source must never be re-embedded during other operations.", encoding="utf-8")
+    add_document(stable_file, store, documents_dir)
+    stable_ids = {chunk_id for chunk_id, doc in store.rows.items() if doc.metadata["source"] == "stable.txt"}
+    stable_embeddings = {chunk_id: store.embeddings[chunk_id] for chunk_id in stable_ids}
+
+    managed_file = tmp_path / "managed.txt"
+    managed_file.write_text("This document is added independently of the stable source.", encoding="utf-8")
+    add_document(managed_file, store, documents_dir)
+    managed_file.write_text("This updated version replaces only the managed source document.", encoding="utf-8")
+    update_document(managed_file, store, documents_dir)
+    delete_document("managed.txt", store, documents_dir)
+
+    assert stable_ids <= store.rows.keys()
+    assert {chunk_id: store.embeddings[chunk_id] for chunk_id in stable_ids} == stable_embeddings
 
 
 # ---------------------------------------------------------------------------
